@@ -1,4 +1,4 @@
-"""Light & Dark Qt stylesheets with customizable accent colors."""
+"""Modern Adobe Acrobat-inspired Light & Dark Qt stylesheets."""
 
 from __future__ import annotations
 
@@ -15,42 +15,56 @@ ACCENT_PRESETS: list[tuple[str, str, str]] = [
 
 def build_stylesheet(dark: bool = False, accent: str = "#ea2e3f", accent_hover: str = "#d22333") -> str:
     if dark:
-        bg_primary = "#18191c"
-        bg_secondary = "#222328"
-        bg_tertiary = "#2a2b32"
-        bg_canvas = "#2b2d36"
-        border = "#383a45"
-        text_primary = "#f0f2f5"
-        text_secondary = "#a0a4b0"
+        bg_app = "#1b1c20"
+        bg_bar = "#25262c"
+        bg_rail = "#202127"
+        bg_hover = "#32343d"
+        bg_canvas = "#2f313a"
+        bg_input = "#1d1e24"
+        border = "#383b46"
+        text_primary = "#f1f5f9"
+        text_secondary = "#94a3b8"
+        tab_active = "#32343d"
     else:
-        bg_primary = "#f8fafc"
-        bg_secondary = "#ffffff"
-        bg_tertiary = "#f1f5f9"
-        bg_canvas = "#e2e8f0"
-        border = "#cbd5e1"
+        bg_app = "#f4f5f7"
+        bg_bar = "#ffffff"
+        bg_rail = "#f8fafc"
+        bg_hover = "#e2e8f0"
+        bg_canvas = "#dfe3ea"
+        bg_input = "#f1f5f9"
+        border = "#d4d8e1"
         text_primary = "#0f172a"
         text_secondary = "#475569"
+        tab_active = "#f1f5f9"
 
     return f"""
     QMainWindow, QDialog {{
-        background-color: {bg_primary};
+        background-color: {bg_app};
         color: {text_primary};
         font-family: "Segoe UI", Arial, sans-serif;
-        font-size: 13px;
+        font-size: 12.5px;
     }}
     QWidget {{
         color: {text_primary};
     }}
-    QFrame#TopBar, QFrame#ModeRibbon, QFrame#SubToolbar {{
-        background-color: {bg_secondary};
+    QFrame#UnifiedTopBar {{
+        background-color: {bg_bar};
         border-bottom: 1px solid {border};
     }}
-    QFrame#Sidebar, QFrame#ToolsPane {{
-        background-color: {bg_secondary};
+    QFrame#ContextBar {{
+        background-color: {bg_rail};
+        border-bottom: 1px solid {border};
+    }}
+    QFrame#LeftToolsRail {{
+        background-color: {bg_rail};
         border-right: 1px solid {border};
     }}
-    QFrame#ToolsPane {{
-        border-right: none;
+    QFrame#RightNavRail {{
+        background-color: {bg_rail};
+        border-left: 1px solid {border};
+    }}
+    QFrame#Sidebar {{
+        background-color: {bg_bar};
         border-left: 1px solid {border};
     }}
     QScrollArea#ViewerScroll {{
@@ -58,25 +72,51 @@ def build_stylesheet(dark: bool = False, accent: str = "#ea2e3f", accent_hover: 
         border: none;
     }}
     QPushButton {{
-        background-color: {bg_tertiary};
+        background-color: transparent;
         color: {text_primary};
-        border: 1px solid {border};
-        border-radius: 5px;
-        padding: 5px 10px;
+        border: 1px solid transparent;
+        border-radius: 6px;
+        padding: 4px 9px;
         font-weight: 500;
     }}
     QPushButton:hover {{
-        background-color: {border};
+        background-color: {bg_hover};
     }}
-    QPushButton:checked, QPushButton[active="true"] {{
+    QPushButton:checked {{
         background-color: {accent};
         color: #ffffff;
-        border-color: {accent_hover};
+    }}
+    QPushButton#RailBtn, QToolButton#RailBtn {{
+        background-color: transparent;
+        color: {text_primary};
+        border: none;
+        border-radius: 8px;
+        padding: 5px 2px;
+        font-size: 10.5px;
+        font-weight: 500;
+    }}
+    QPushButton#RailBtn:hover, QToolButton#RailBtn:hover {{
+        background-color: {bg_hover};
+    }}
+    QPushButton#RailBtn:checked, QToolButton#RailBtn:checked {{
+        background-color: {accent};
+        color: #ffffff;
+    }}
+    QPushButton#PillBtn {{
+        background-color: {bg_input};
+        border: 1px solid {border};
+        border-radius: 6px;
+        padding: 4px 10px;
+    }}
+    QPushButton#PillBtn:hover {{
+        background-color: {bg_hover};
     }}
     QPushButton#PrimaryBtn {{
         background-color: {accent};
         color: #ffffff;
-        border-color: {accent_hover};
+        border: none;
+        border-radius: 6px;
+        padding: 5px 12px;
         font-weight: 600;
     }}
     QPushButton#PrimaryBtn:hover {{
@@ -85,70 +125,72 @@ def build_stylesheet(dark: bool = False, accent: str = "#ea2e3f", accent_hover: 
     QPushButton#DangerBtn {{
         background-color: #dc2626;
         color: #ffffff;
-        border-color: #b91c1c;
-    }}
-    QPushButton#ModeTabBtn {{
-        background-color: transparent;
-        border: none;
-        border-bottom: 2px solid transparent;
-        border-radius: 0px;
-        padding: 7px 14px;
-        font-weight: 600;
-        color: {text_secondary};
-    }}
-    QPushButton#ModeTabBtn:hover {{
-        color: {text_primary};
-        background-color: {bg_tertiary};
-    }}
-    QPushButton#ModeTabBtn:checked {{
-        color: {accent};
-        border-bottom: 3px solid {accent};
-        background-color: transparent;
+        border-radius: 6px;
+        padding: 4px 10px;
     }}
     QComboBox, QSpinBox, QLineEdit {{
-        background-color: {bg_secondary};
+        background-color: {bg_input};
         color: {text_primary};
         border: 1px solid {border};
-        border-radius: 4px;
-        padding: 4px 6px;
+        border-radius: 6px;
+        padding: 3px 8px;
         min-height: 24px;
     }}
-    QTabWidget::pane {{
-        border: none;
-        background-color: {bg_canvas};
+    QComboBox:focus, QLineEdit:focus, QSpinBox:focus {{
+        border-color: {accent};
     }}
-    QTabBar::tab {{
-        background-color: {bg_tertiary};
+    QTabBar#InlineDocTabs::tab {{
+        background-color: transparent;
         color: {text_secondary};
-        border: 1px solid {border};
-        border-bottom: none;
-        padding: 6px 14px;
-        margin-right: 2px;
-        border-top-left-radius: 6px;
-        border-top-right-radius: 6px;
+        border: 1px solid transparent;
+        border-radius: 6px;
+        padding: 4px 10px;
+        margin: 0px 2px;
+        max-width: 190px;
     }}
-    QTabBar::tab:selected {{
-        background-color: {bg_secondary};
+    QTabBar#InlineDocTabs::tab:hover {{
+        background-color: {bg_hover};
         color: {text_primary};
+    }}
+    QTabBar#InlineDocTabs::tab:selected {{
+        background-color: {tab_active};
+        color: {text_primary};
+        border: 1px solid {border};
         font-weight: 600;
     }}
     QListWidget {{
-        background-color: {bg_secondary};
+        background-color: {bg_bar};
         border: none;
         outline: none;
     }}
     QListWidget::item {{
         padding: 6px;
-        border-radius: 4px;
+        border-radius: 6px;
     }}
     QListWidget::item:selected {{
         background-color: {accent};
         color: #ffffff;
     }}
     QStatusBar {{
-        background-color: {bg_secondary};
+        background-color: {bg_bar};
         border-top: 1px solid {border};
         color: {text_secondary};
+        font-size: 11.5px;
+    }}
+    QMenu {{
+        background-color: {bg_bar};
+        color: {text_primary};
+        border: 1px solid {border};
+        border-radius: 8px;
+        padding: 4px;
+    }}
+    QMenu::item {{
+        padding: 6px 18px;
+        border-radius: 4px;
+    }}
+    QMenu::item:selected {{
+        background-color: {accent};
+        color: #ffffff;
     }}
     QFrame#FloatingFormatBar {{
         background-color: #ffffff;

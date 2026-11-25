@@ -19,11 +19,21 @@ def test_gui_load_search_theme_and_sequential_in_place_editing(qtbot, tmp_path):
     qtbot.addWidget(win)
     win.show()
 
-    # 1. Open real PDF document
+    # 1. Open real PDF document and verify compact Acrobat-style header + uniform white paper
     tab = win.open_pdf_path(str(SQL_PDF))
     assert tab is not None
     assert tab.engine.page_count == 13
     assert win.tabs.count() == 1
+    assert win.ribbon.top_bar.height() <= 48
+    assert not win.ribbon.context_bar.isVisible()
+
+    # Render page widget and assert background margins are pure white (255,255,255), NOT grey
+    pw1 = tab.page_widgets[0]
+    rendered_img = pw1.grab().toImage()
+    margin_px = rendered_img.pixelColor(12, 12)
+    body_gap_px = rendered_img.pixelColor(12, int(pw1.height() * 0.45))
+    assert (margin_px.red(), margin_px.green(), margin_px.blue()) == (255, 255, 255)
+    assert (body_gap_px.red(), body_gap_px.green(), body_gap_px.blue()) == (255, 255, 255)
 
     # 2. Search functionality
     win.ribbon.search_input.setText("Heap")

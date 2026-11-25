@@ -1,8 +1,8 @@
-"""Top bar, 7-mode ribbon, contextual sub-toolbar, and right quick-tools panel."""
+"""Modern Adobe Acrobat-inspired space-saving Unified Top Bar, Left Tools Rail, and Contextual Strip."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -13,16 +13,22 @@ from PySide6.QtWidgets import (
     QMenu,
     QPushButton,
     QSpinBox,
+    QTabBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from app.core.fonts import available_ui_fonts
+from app.ui.icons import make_icon
 from app.ui.theme import ACCENT_PRESETS
 
 
 class RibbonHeader(QWidget):
-    """Unified header containing File Bar, Mode Tabs, and Contextual Sub-Toolbar."""
+    """
+    Space-saving Acrobat-style top bar:
+    - Single 44px Unified Top Bar containing Menu, quick icons, inline document tabs, page nav, zoom, and search.
+    - Slim 34px Contextual Bar shown only when active mode has sub-tools (hidden in View mode).
+    """
 
     openClicked = Signal()
     saveClicked = Signal()
@@ -48,188 +54,136 @@ class RibbonHeader(QWidget):
     modeChanged = Signal(str)
     toolAction = Signal(str, dict)
 
-    MODES = [
-        ("view", "View & Read"),
-        ("annotate", "Annotate & Markup"),
-        ("organize", "Organize Pages"),
-        ("edit", "Edit & Watermark"),
-        ("forms", "Fill & Sign"),
-        ("protect", "Protect & Redact"),
-        ("export", "Export"),
-    ]
-
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
+        self._icon_color = "#334155"
+        self.current_mode = "view"
+        self._tool_buttons: list[tuple[QPushButton, str]] = []
+
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # 1. Top Menu / File Bar
-        top_bar = QFrame()
-        top_bar.setObjectName("TopBar")
-        tb = QHBoxLayout(top_bar)
-        tb.setContentsMargins(10, 6, 10, 6)
-        tb.setSpacing(6)
+        # 1. Single 44px Unified Acrobat-style Top Bar
+        self.top_bar = QFrame()
+        self.top_bar.setObjectName("UnifiedTopBar")
+        self.top_bar.setFixedHeight(44)
+        tb = QHBoxLayout(self.top_bar)
+        tb.setContentsMargins(8, 4, 8, 4)
+        tb.setSpacing(4)
 
-        brand = QLabel("Personal PDF Suite")
-        brand.setStyleSheet("font-weight:700; font-size:14px;")
-        tb.addWidget(brand)
-        tb.addStretch()
+        # Brand pill + Menu dropdown
+        badge = QLabel("PDF")
+        badge.setFixedSize(28, 24)
+        badge.setAlignment(Qt.AlignCenter)
+        badge.setStyleSheet(
+            "background-color:#ea2e3f; color:#ffffff; font-weight:800; font-size:10px; border-radius:5px;"
+        )
+        tb.addWidget(badge)
 
-        self.btn_open = QPushButton("Open")
-        self.btn_open.clicked.connect(self.openClicked.emit)
-        self.btn_save = QPushButton("Save")
-        self.btn_save.setObjectName("PrimaryBtn")
-        self.btn_save.clicked.connect(self.saveClicked.emit)
-        self.btn_save_as = QPushButton("Save As")
-        self.btn_save_as.clicked.connect(self.saveAsClicked.emit)
-        self.btn_print = QPushButton("Print")
-        self.btn_print.clicked.connect(self.printClicked.emit)
-        self.btn_theme = QPushButton("Theme")
-        self.btn_theme.clicked.connect(self.themeToggled.emit)
-        self.btn_accent = QPushButton("Accent")
-        self._build_accent_menu()
-        self.btn_props = QPushButton("Properties")
-        self.btn_props.clicked.connect(self.propsClicked.emit)
-        self.btn_tools_pane = QPushButton("Tools")
-        self.btn_tools_pane.clicked.connect(self.toggleToolsPaneClicked.emit)
+        self.btn_menu = QPushButton("Menu")
+        self.btn_menu.setToolTip("File, View & Preferences")
+        self._build_main_menu()
+        tb.addWidget(self.btn_menu)
 
-        for b in (
-            self.btn_open,
-            self.btn_save,
-            self.btn_save_as,
-            self.btn_print,
-            self.btn_theme,
-            self.btn_accent,
-            self.btn_props,
-            self.btn_tools_pane,
-        ):
+        self.btn_open = self._icon_btn("open", "Open PDF (Ctrl+O)", self.openClicked.emit)
+        self.btn_save = self._icon_btn("save", "Save PDF (Ctrl+S)", self.saveClicked.emit)
+        self.btn_print = self._icon_btn("print", "Print (Ctrl+P)", self.printClicked.emit)
+        self.btn_undo = self._icon_btn("undo", "Undo (Ctrl+Z)", self.undoClicked.emit)
+        self.btn_redo = self._icon_btn("redo", "Redo (Ctrl+Y)", self.redoClicked.emit)
+        for b in (self.btn_open, self.btn_save, self.btn_print, self.btn_undo, self.btn_redo):
             tb.addWidget(b)
-        root.addWidget(top_bar)
 
-        # 2. Mode Ribbon Tabs
-        mode_bar = QFrame()
-        mode_bar.setObjectName("ModeRibbon")
-        mb = QHBoxLayout(mode_bar)
-        mb.setContentsMargins(8, 0, 8, 0)
-        mb.setSpacing(2)
-        self.mode_group = QButtonGroup(self)
-        self.mode_group.setExclusive(True)
-        self.mode_buttons: dict[str, QPushButton] = {}
-        for key, title in self.MODES:
-            btn = QPushButton(title)
-            btn.setObjectName("ModeTabBtn")
-            btn.setCheckable(True)
-            btn.clicked.connect(lambda _chk, k=key: self._select_mode(k))
-            self.mode_group.addButton(btn)
-            self.mode_buttons[key] = btn
-            mb.addWidget(btn)
-        mb.addStretch()
-        root.addWidget(mode_bar)
+        # Inline Document Tabs right inside the Top Bar
+        self.inline_tabs = QTabBar()
+        self.inline_tabs.setObjectName("InlineDocTabs")
+        self.inline_tabs.setTabsClosable(True)
+        self.inline_tabs.setMovable(True)
+        self.inline_tabs.setExpanding(False)
+        self.inline_tabs.setElideMode(Qt.ElideRight)
+        tb.addWidget(self.inline_tabs, stretch=1)
 
-        # 3. Sub-Toolbar (universal navigation + dynamic mode controls + search)
-        sub_bar = QFrame()
-        sub_bar.setObjectName("SubToolbar")
-        sb = QHBoxLayout(sub_bar)
-        sb.setContentsMargins(8, 5, 8, 5)
-        sb.setSpacing(5)
-
-        self.btn_sidebar = QPushButton("Sidebar")
-        self.btn_sidebar.setCheckable(True)
-        self.btn_sidebar.setChecked(True)
-        self.btn_sidebar.clicked.connect(self.toggleSidebarClicked.emit)
-        self.btn_undo = QPushButton("Undo")
-        self.btn_undo.clicked.connect(self.undoClicked.emit)
-        self.btn_redo = QPushButton("Redo")
-        self.btn_redo.clicked.connect(self.redoClicked.emit)
-
-        self.btn_prev = QPushButton("◀")
-        self.btn_prev.setFixedWidth(30)
-        self.btn_prev.clicked.connect(self.prevPageClicked.emit)
+        # Compact Page Navigation
+        self.btn_prev = self._icon_btn("prev", "Previous Page", self.prevPageClicked.emit, size=14)
         self.page_spin = QSpinBox()
         self.page_spin.setRange(1, 1)
-        self.page_spin.setFixedWidth(56)
+        self.page_spin.setFixedWidth(50)
         self.page_spin.valueChanged.connect(lambda v: self.pageJumpRequested.emit(v - 1))
         self.lbl_page_total = QLabel("/ 0")
-        self.btn_next = QPushButton("▶")
-        self.btn_next.setFixedWidth(30)
-        self.btn_next.clicked.connect(self.nextPageClicked.emit)
+        self.lbl_page_total.setStyleSheet("padding: 0 3px; font-size:12px;")
+        self.btn_next = self._icon_btn("next", "Next Page", self.nextPageClicked.emit, size=14)
+        for w in (self.btn_prev, self.page_spin, self.lbl_page_total, self.btn_next):
+            tb.addWidget(w)
 
-        self.btn_zoom_out = QPushButton("−")
-        self.btn_zoom_out.setFixedWidth(28)
-        self.btn_zoom_out.clicked.connect(self.zoomOutClicked.emit)
+        # Compact Zoom & Rotate
+        self.btn_zoom_out = self._icon_btn("zoom_out", "Zoom Out (Ctrl+-)", self.zoomOutClicked.emit, size=15)
         self.zoom_combo = QComboBox()
         self.zoom_combo.addItems(["Fit Width", "Fit Page", "75%", "100%", "125%", "150%", "200%", "300%"])
+        self.zoom_combo.setFixedWidth(92)
         self.zoom_combo.currentTextChanged.connect(self.zoomModeChanged.emit)
-        self.btn_zoom_in = QPushButton("+")
-        self.btn_zoom_in.setFixedWidth(28)
-        self.btn_zoom_in.clicked.connect(self.zoomInClicked.emit)
-        self.btn_rotate = QPushButton("↻")
-        self.btn_rotate.setToolTip("Rotate 90° CW")
-        self.btn_rotate.setFixedWidth(30)
-        self.btn_rotate.clicked.connect(self.rotateCWClicked.emit)
+        self.btn_zoom_in = self._icon_btn("zoom_in", "Zoom In (Ctrl+=)", self.zoomInClicked.emit, size=15)
+        self.btn_rotate = self._icon_btn("rotate", "Rotate 90° CW", self.rotateCWClicked.emit, size=15)
+        for w in (self.btn_zoom_out, self.zoom_combo, self.btn_zoom_in, self.btn_rotate):
+            tb.addWidget(w)
 
-        for w in (
-            self.btn_sidebar,
-            self.btn_undo,
-            self.btn_redo,
-            self.btn_prev,
-            self.page_spin,
-            self.lbl_page_total,
-            self.btn_next,
-            self.btn_zoom_out,
-            self.zoom_combo,
-            self.btn_zoom_in,
-            self.btn_rotate,
-        ):
-            sb.addWidget(w)
-
-        # Dynamic controls area
-        self.dynamic_host = QWidget()
-        self.dynamic_layout = QHBoxLayout(self.dynamic_host)
-        self.dynamic_layout.setContentsMargins(6, 0, 6, 0)
-        self.dynamic_layout.setSpacing(4)
-        sb.addWidget(self.dynamic_host, stretch=1)
-
-        # Search box
+        # Compact Search Pill
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Find (Ctrl+F)...")
-        self.search_input.setFixedWidth(155)
+        self.search_input.setFixedWidth(135)
         self.search_input.textChanged.connect(self.searchChanged.emit)
         self.lbl_search_count = QLabel("0/0")
-        self.btn_search_prev = QPushButton("▲")
-        self.btn_search_prev.setFixedWidth(26)
-        self.btn_search_prev.clicked.connect(self.searchPrevClicked.emit)
-        self.btn_search_next = QPushButton("▼")
-        self.btn_search_next.setFixedWidth(26)
-        self.btn_search_next.clicked.connect(self.searchNextClicked.emit)
-        sb.addWidget(self.search_input)
-        sb.addWidget(self.lbl_search_count)
-        sb.addWidget(self.btn_search_prev)
-        sb.addWidget(self.btn_search_next)
+        self.lbl_search_count.setStyleSheet("font-size:11px; padding:0 2px;")
+        self.btn_search_prev = self._icon_btn("up", "Previous Match", self.searchPrevClicked.emit, size=13)
+        self.btn_search_next = self._icon_btn("down", "Next Match", self.searchNextClicked.emit, size=13)
+        for w in (self.search_input, self.lbl_search_count, self.btn_search_prev, self.btn_search_next):
+            tb.addWidget(w)
 
-        root.addWidget(sub_bar)
+        root.addWidget(self.top_bar)
 
-        self.current_mode = "view"
-        self.mode_buttons["view"].setChecked(True)
-        self._build_dynamic_tools("view")
+        # 2. Slim 36px Contextual Bar (only visible when sub-tools are active)
+        self.context_bar = QFrame()
+        self.context_bar.setObjectName("ContextBar")
+        self.context_bar.setFixedHeight(36)
+        self.dynamic_layout = QHBoxLayout(self.context_bar)
+        self.dynamic_layout.setContentsMargins(10, 3, 10, 3)
+        self.dynamic_layout.setSpacing(5)
+        root.addWidget(self.context_bar)
+        self.context_bar.hide()
 
-    def _build_accent_menu(self) -> None:
+    def _icon_btn(self, icon_name: str, tip: str, slot, size: int = 16) -> QPushButton:
+        btn = QPushButton()
+        btn.setIcon(make_icon(icon_name, self._icon_color, size))
+        btn.setIconSize(QSize(size, size))
+        btn.setFixedSize(28, 28)
+        btn.setToolTip(tip)
+        btn.clicked.connect(slot)
+        self._tool_buttons.append((btn, icon_name))
+        return btn
+
+    def _build_main_menu(self) -> None:
         menu = QMenu(self)
+        menu.addAction("Open PDF... (Ctrl+O)", self.openClicked.emit)
+        menu.addAction("Save (Ctrl+S)", self.saveClicked.emit)
+        menu.addAction("Save As... (Ctrl+Shift+S)", self.saveAsClicked.emit)
+        menu.addAction("Print... (Ctrl+P)", self.printClicked.emit)
+        menu.addSeparator()
+        menu.addAction("Document Properties...", self.propsClicked.emit)
+        menu.addAction("Toggle Dark / Light Theme", self.themeToggled.emit)
+        accent_sub = menu.addMenu("Accent Color")
         for name, col, hov in ACCENT_PRESETS:
-            act = menu.addAction(name)
-            act.triggered.connect(lambda _=False, c=col, h=hov: self.accentChanged.emit(c, h))
-        self.btn_accent.setMenu(menu)
+            accent_sub.addAction(name, lambda c=col, h=hov: self.accentChanged.emit(c, h))
+        self.btn_menu.setMenu(menu)
 
-    def _select_mode(self, mode: str) -> None:
-        self.current_mode = mode
-        if mode in self.mode_buttons:
-            self.mode_buttons[mode].setChecked(True)
-        self._build_dynamic_tools(mode)
-        self.modeChanged.emit(mode)
+    def refresh_icon_theme(self, dark: bool) -> None:
+        self._icon_color = "#e2e8f0" if dark else "#334155"
+        self.btn_menu.setIcon(make_icon("menu", self._icon_color, 15))
+        for btn, icon_name in self._tool_buttons:
+            btn.setIcon(make_icon(icon_name, self._icon_color, btn.iconSize().width()))
 
     def set_mode(self, mode: str) -> None:
-        self._select_mode(mode)
+        self.current_mode = mode
+        self._build_dynamic_tools(mode)
+        self.modeChanged.emit(mode)
 
     def update_page_info(self, current_zero: int, total: int) -> None:
         self.page_spin.blockSignals(True)
@@ -260,6 +214,8 @@ class RibbonHeader(QWidget):
             btn.setChecked(checked)
         if danger:
             btn.setObjectName("DangerBtn")
+        else:
+            btn.setObjectName("PillBtn")
         btn.clicked.connect(lambda _=False, a=action_name, ex=extra or {}: self.toolAction.emit(a, ex))
         self.dynamic_layout.addWidget(btn)
         return btn
@@ -267,16 +223,27 @@ class RibbonHeader(QWidget):
     def _build_dynamic_tools(self, mode: str) -> None:
         self._clear_dynamic_tools()
         if mode == "view":
-            grp = QButtonGroup(self.dynamic_host)
+            # In View mode, hide the contextual strip completely to maximize top space
+            self.context_bar.hide()
+            return
+
+        self.context_bar.show()
+        if mode == "edit":
+            grp = QButtonGroup(self.context_bar)
             grp.setExclusive(True)
-            b_sel = self._add_tool_btn("Select Text", "tool:select", checkable=True, checked=True)
-            b_pan = self._add_tool_btn("Pan", "tool:pan", checkable=True)
-            grp.addButton(b_sel)
-            grp.addButton(b_pan)
-            self._add_tool_btn("Copy Text", "copy_selection")
+            b_in = self._add_tool_btn("Edit Text", "tool:edit_text", checkable=True, checked=True)
+            b_add = self._add_tool_btn("Add Text", "tool:add_text", checkable=True)
+            b_wo = self._add_tool_btn("Whiteout", "tool:whiteout", checkable=True)
+            grp.addButton(b_in)
+            grp.addButton(b_add)
+            grp.addButton(b_wo)
+            self._add_tool_btn("Insert Image", "insert_image")
+            self._add_tool_btn("Word-Flow Editor", "open_word_flow")
+            self._add_tool_btn("Watermark", "open_watermark")
+            self._add_tool_btn("Bates Numbers", "open_bates")
 
         elif mode == "annotate":
-            grp = QButtonGroup(self.dynamic_host)
+            grp = QButtonGroup(self.context_bar)
             grp.setExclusive(True)
             for label, tname, chk in [
                 ("Select", "tool:select", False),
@@ -304,34 +271,108 @@ class RibbonHeader(QWidget):
             self._add_tool_btn("Visual Page Grid", "open_organizer")
             self._add_tool_btn("+ Blank Page", "insert_blank")
             self._add_tool_btn("Rotate 90° CW", "rotate_cw")
-            self._add_tool_btn("Combine PDFs...", "open_merge")
-            self._add_tool_btn("Split PDF...", "open_split")
-
-        elif mode == "edit":
-            grp = QButtonGroup(self.dynamic_host)
-            grp.setExclusive(True)
-            b_in = self._add_tool_btn("In-Place Text", "tool:edit_text", checkable=True, checked=True)
-            b_add = self._add_tool_btn("Add Text", "tool:add_text", checkable=True)
-            b_wo = self._add_tool_btn("Whiteout", "tool:whiteout", checkable=True)
-            grp.addButton(b_in)
-            grp.addButton(b_add)
-            grp.addButton(b_wo)
-            self._add_tool_btn("Image...", "insert_image")
-            self._add_tool_btn("Word-Flow Mode", "open_word_flow")
-            self._add_tool_btn("Watermark...", "open_watermark")
-            self._add_tool_btn("Bates Numbers...", "open_bates")
+            self._add_tool_btn("Combine PDFs", "open_merge")
+            self._add_tool_btn("Split PDF", "open_split")
 
         elif mode == "forms":
-            self._add_tool_btn("Place Signature...", "open_signature")
-            self._add_tool_btn("Flatten Form Fields", "flatten_forms")
+            self._add_tool_btn("Place Signature", "open_signature")
+            self._add_tool_btn("Flatten Forms", "flatten_forms")
 
         elif mode == "protect":
-            self._add_tool_btn("Encrypt (AES-256)...", "open_protect")
-            self._add_tool_btn("Add Redaction Box", "tool:redact", checkable=True, danger=True)
+            self._add_tool_btn("Encrypt (AES-256)", "open_protect")
+            self._add_tool_btn("Redact Area", "tool:redact", checkable=True, danger=True)
 
         elif mode == "export":
-            self._add_tool_btn("Export Page (PNG)...", "export_png")
-            self._add_tool_btn("Export All Pages...", "export_all_png")
-            self._add_tool_btn("Extract Text (TXT)...", "export_text")
+            self._add_tool_btn("Export Page (PNG)", "export_png")
+            self._add_tool_btn("Export All Pages", "export_all_png")
+            self._add_tool_btn("Extract Text (TXT)", "export_text")
 
         self.dynamic_layout.addStretch()
+
+
+class LeftToolsRail(QFrame):
+    """Adobe Acrobat-style compact left vertical tool rail with stacked SVG icon + label."""
+
+    modeSelected = Signal(str)
+    toolAction = Signal(str, dict)
+
+    ITEMS = [
+        ("view", "view", "View"),
+        ("edit", "edit", "Edit"),
+        ("annotate", "annotate", "Draw"),
+        ("organize", "organize", "Pages"),
+        ("forms", "forms", "Sign"),
+        ("protect", "protect", "Protect"),
+        ("export", "export", "Export"),
+    ]
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("LeftToolsRail")
+        self.setFixedWidth(58)
+        self._icon_color = "#334155"
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 8, 4, 8)
+        layout.setSpacing(4)
+
+        self.group = QButtonGroup(self)
+        self.group.setExclusive(True)
+        self.buttons: dict[str, tuple[QToolButton, str]] = {}
+
+        for key, icon_name, label in self.ITEMS:
+            btn = QToolButton()
+            btn.setObjectName("RailBtn")
+            btn.setText(label)
+            btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            btn.setCheckable(True)
+            btn.setToolTip(label)
+            btn.setIcon(make_icon(icon_name, self._icon_color, 18))
+            btn.setIconSize(QSize(18, 18))
+            btn.setFixedSize(50, 48)
+            btn.clicked.connect(lambda _chk, k=key: self.modeSelected.emit(k))
+            self.group.addButton(btn)
+            self.buttons[key] = (btn, icon_name)
+            layout.addWidget(btn)
+
+        layout.addSpacing(8)
+        self.btn_pan = QToolButton()
+        self.btn_pan.setObjectName("RailBtn")
+        self.btn_pan.setText("Pan")
+        self.btn_pan.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+        self.btn_pan.setCheckable(True)
+        self.btn_pan.setToolTip("Pan / Hand Scroll")
+        self.btn_pan.setIcon(make_icon("pan", self._icon_color, 16))
+        self.btn_pan.setIconSize(QSize(16, 16))
+        self.btn_pan.setFixedSize(50, 42)
+        self.btn_pan.clicked.connect(
+            lambda chk: self.toolAction.emit("tool:pan" if chk else "tool:select", {})
+        )
+        layout.addWidget(self.btn_pan)
+
+        self.btn_copy = QToolButton()
+        self.btn_copy.setObjectName("RailBtn")
+        self.btn_copy.setText("Copy")
+        self.btn_copy.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+        self.btn_copy.setToolTip("Copy Selected Text")
+        self.btn_copy.setIcon(make_icon("copy", self._icon_color, 16))
+        self.btn_copy.setIconSize(QSize(16, 16))
+        self.btn_copy.setFixedSize(50, 42)
+        self.btn_copy.clicked.connect(lambda: self.toolAction.emit("copy_selection", {}))
+        layout.addWidget(self.btn_copy)
+
+        layout.addStretch()
+        self.buttons["view"][0].setChecked(True)
+
+    def set_active_mode(self, mode: str) -> None:
+        if mode in self.buttons:
+            self.buttons[mode][0].setChecked(True)
+        if mode != "view":
+            self.btn_pan.setChecked(False)
+
+    def refresh_icon_theme(self, dark: bool) -> None:
+        self._icon_color = "#e2e8f0" if dark else "#334155"
+        for btn, icon_name in self.buttons.values():
+            btn.setIcon(make_icon(icon_name, self._icon_color, 18))
+        self.btn_pan.setIcon(make_icon("pan", self._icon_color, 16))
+        self.btn_copy.setIcon(make_icon("copy", self._icon_color, 16))

@@ -1,4 +1,4 @@
-"""Main application window, multi-document tabs, undo/redo, and native Windows printing."""
+"""Main application window with Adobe Acrobat-inspired space-saving UI, inline tabs, and native printing."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import os
 from dataclasses import dataclass
 
 import pymupdf
-from PySide6.QtCore import QEvent, QPoint, Qt
-from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QIcon, QImage, QKeySequence, QPainter, QShortcut
+from PySide6.QtCore import QPoint, QSize, Qt
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QImage, QKeySequence, QPainter, QShortcut
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
     QApplication,
@@ -20,24 +20,25 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QStackedWidget,
     QStatusBar,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from app.core.document_ops import (
+    PageOp,
     apply_bates_numbering,
     apply_watermark,
     encrypt_pdf_aes256,
     export_page_image,
     extract_clean_text,
     flatten_form_fields,
+    get_metadata,
     merge_pdfs,
     organize_pages,
     split_pdf_by_ranges,
     update_metadata,
-    get_metadata,
     write_bytes_atomic,
 )
 from app.core.ligatures import heal_pdf_text
@@ -59,8 +60,9 @@ from app.ui.dialogs import (
     WordFlowDialog,
 )
 from app.ui.floating_bar import FloatingFormatBar
+from app.ui.icons import make_icon
 from app.ui.page_widget import PDFPageWidget
-from app.ui.ribbon import RibbonHeader
+from app.ui.ribbon import LeftToolsRail, RibbonHeader
 from app.ui.sidebar import SidebarPanel
 from app.ui.text_editor import InPlaceTextEditor
 from app.ui.theme import build_stylesheet
@@ -68,7 +70,7 @@ from app.ui.theme import build_stylesheet
 
 @dataclass
 class _UndoEntry:
-    kind: str  # "in_place_edit", "ink", "shape", "markup", "note", "textbox", "stamp", "whiteout", "redact"
+    kind: str
     page_idx: int
     payload: object
     previous_payload: object | None = None
@@ -95,9 +97,10 @@ class DocumentTab(QScrollArea):
         self.search_idx: int = -1
 
         self.pages_container = QWidget()
+        self.pages_container.setStyleSheet("background: transparent;")
         self.pages_layout = QVBoxLayout(self.pages_container)
-        self.pages_layout.setContentsMargins(20, 20, 20, 30)
-        self.pages_layout.setSpacing(18)
+        self.pages_layout.setContentsMargins(20, 16, 20, 28)
+        self.pages_layout.setSpacing(16)
         self.pages_layout.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
         self.setWidget(self.pages_container)
 
@@ -185,7 +188,7 @@ class DocumentTab(QScrollArea):
 
 
 class MainWindow(QMainWindow):
-    """Native Windows Personal PDF Suite main window."""
+    """Native Windows Personal PDF Suite main window (Acrobat-style compact layout)."""
 
     def __init__(self, initial_file: str | None = None):
         super().__init__()
@@ -215,6 +218,7 @@ class MainWindow(QMainWindow):
         }
         self._active_editor: InPlaceTextEditor | None = None
         self._active_editor_page: PDFPageWidget | None = None
+        self._right_rail_buttons: list[tuple[QPushButton, str]] = []
 
         self._build_ui()
         self._bind_shortcuts()
@@ -230,6 +234,7 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
+        # Single compact top header + optional contextual sub-bar
         self.ribbon = RibbonHeader(self)
         root.addWidget(self.ribbon)
 
@@ -237,10 +242,11 @@ class MainWindow(QMainWindow):
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
 
-        self.sidebar = SidebarPanel(self)
-        body.addWidget(self.sidebar)
+        # Left Acrobat-style All-Tools vertical rail
+        self.left_rail = LeftToolsRail(self)
+        body.addWidget(self.left_rail)
 
-        # Center area: Welcome Stack or Multi-Tab Viewer
+        # Center area: Welcome Screen + Stacked Document Views (tabs live inside top bar!)
         self.center_host = QWidget()
         center_v = QVBoxLayout(self.center_host)
         center_v.setContentsMargins(0, 0, 0, 0)
@@ -249,18 +255,24 @@ class MainWindow(QMainWindow):
         self.welcome_widget = self._build_welcome_widget()
         center_v.addWidget(self.welcome_widget)
 
-        self.tabs = QTabWidget()
-        self.tabs.setTabsClosable(True)
+        self.doc_stack = QStackedWidget()
+        self.doc_stack.hide()
+        center_v.addWidget(self.doc_stack)
+
+        # Keep `.tabs` reference pointed to the inline tab bar for clean compatibility
+        self.tabs: QTabBar = self.ribbon.inline_tabs
         self.tabs.tabCloseRequested.connect(self._close_tab)
         self.tabs.currentChanged.connect(self._on_tab_changed)
-        self.tabs.hide()
-        center_v.addWidget(self.tabs)
 
         body.addWidget(self.center_host, stretch=1)
 
-        # Right Quick-Tools Panel
-        self.tools_pane = self._build_right_tools_pane()
-        body.addWidget(self.tools_pane)
+        # Right collapsible Sidebar (Pages / Outline / Notes) + Acrobat-style Right Icon Rail
+        self.sidebar = SidebarPanel(self)
+        self.sidebar.hide()  # Hidden by default to maximize document area; toggled via right rail
+        body.addWidget(self.sidebar)
+
+        self.right_rail = self._build_right_nav_rail()
+        body.addWidget(self.right_rail)
 
         root.addLayout(body, stretch=1)
 
@@ -281,7 +293,9 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready — Open a PDF or load the Sample PDF")
 
-        # Wire ribbon signals
+        # Wire header & left rail signals
+        self.left_rail.modeSelected.connect(self.set_mode)
+        self.left_rail.toolAction.connect(self._on_tool_action)
         self.ribbon.openClicked.connect(self.open_file_dialog)
         self.ribbon.saveClicked.connect(self.save_current_pdf)
         self.ribbon.saveAsClicked.connect(self.save_as_current_pdf)
@@ -289,8 +303,6 @@ class MainWindow(QMainWindow):
         self.ribbon.themeToggled.connect(self.toggle_theme)
         self.ribbon.accentChanged.connect(self.set_accent_theme)
         self.ribbon.propsClicked.connect(self.open_metadata_dialog)
-        self.ribbon.toggleToolsPaneClicked.connect(lambda: self.tools_pane.setVisible(not self.tools_pane.isVisible()))
-        self.ribbon.toggleSidebarClicked.connect(lambda: self.sidebar.setVisible(not self.sidebar.isVisible()))
         self.ribbon.undoClicked.connect(self.undo)
         self.ribbon.redoClicked.connect(self.redo)
         self.ribbon.prevPageClicked.connect(lambda: self.jump_page_delta(-1))
@@ -308,6 +320,43 @@ class MainWindow(QMainWindow):
 
         self.sidebar.pageSelected.connect(self.go_to_page)
         self.sidebar.bookmarkAdded.connect(lambda t, p: self.status_bar.showMessage(f"Bookmark added: {t} (Page {p + 1})"))
+
+    def _build_right_nav_rail(self) -> QFrame:
+        rail = QFrame()
+        rail.setObjectName("RightNavRail")
+        rail.setFixedWidth(40)
+        v = QVBoxLayout(rail)
+        v.setContentsMargins(4, 8, 4, 8)
+        v.setSpacing(6)
+
+        for icon_name, tip, tab_idx in [
+            ("pages", "Page Thumbnails", 0),
+            ("bookmark", "Bookmarks & Outline", 1),
+            ("notes", "Annotations & Edits", 2),
+        ]:
+            btn = QPushButton()
+            btn.setFixedSize(32, 32)
+            btn.setToolTip(tip)
+            btn.clicked.connect(lambda _=False, ti=tab_idx: self._toggle_sidebar_tab(ti))
+            self._right_rail_buttons.append((btn, icon_name))
+            v.addWidget(btn)
+
+        v.addStretch()
+
+        btn_theme = QPushButton()
+        btn_theme.setFixedSize(32, 32)
+        btn_theme.setToolTip("Toggle Light / Dark Theme")
+        btn_theme.clicked.connect(self.toggle_theme)
+        self._right_rail_buttons.append((btn_theme, "theme"))
+        v.addWidget(btn_theme)
+        return rail
+
+    def _toggle_sidebar_tab(self, tab_idx: int) -> None:
+        if self.sidebar.isVisible() and self.sidebar.tabs.currentIndex() == tab_idx:
+            self.sidebar.hide()
+        else:
+            self.sidebar.tabs.setCurrentIndex(tab_idx)
+            self.sidebar.show()
 
     def _build_welcome_widget(self) -> QWidget:
         w = QWidget()
@@ -327,6 +376,7 @@ class MainWindow(QMainWindow):
         btn_open.setMinimumHeight(38)
         btn_open.clicked.connect(self.open_file_dialog)
         btn_sample = QPushButton("Load Sample PDF")
+        btn_sample.setObjectName("PillBtn")
         btn_sample.setMinimumHeight(38)
         btn_sample.clicked.connect(self.load_sample_pdf)
         row.addWidget(btn_open)
@@ -342,44 +392,6 @@ class MainWindow(QMainWindow):
         v.addWidget(hint)
         return w
 
-    def _build_right_tools_pane(self) -> QFrame:
-        pane = QFrame()
-        pane.setObjectName("ToolsPane")
-        pane.setFixedWidth(185)
-        pane.hide()
-        v = QVBoxLayout(pane)
-        v.setContentsMargins(8, 8, 8, 8)
-        v.setSpacing(6)
-        hdr = QLabel("Quick Tools")
-        hdr.setStyleSheet("font-weight:700;")
-        v.addWidget(hdr)
-
-        for label, mode in [
-            ("View & Read", "view"),
-            ("Edit PDF Text", "edit"),
-            ("Annotate & Markup", "annotate"),
-            ("Organize Pages", "organize"),
-            ("Fill & Sign", "forms"),
-            ("Protect & Redact", "protect"),
-            ("Export", "export"),
-        ]:
-            b = QPushButton(label)
-            b.clicked.connect(lambda _=False, m=mode: self.ribbon.set_mode(m))
-            v.addWidget(b)
-
-        v.addSpacing(8)
-        for label, action in [
-            ("Word-Flow Mode", "open_word_flow"),
-            ("Watermark...", "open_watermark"),
-            ("Bates Numbering...", "open_bates"),
-            ("Combine PDFs...", "open_merge"),
-        ]:
-            b = QPushButton(label)
-            b.clicked.connect(lambda _=False, a=action: self._on_tool_action(a, {}))
-            v.addWidget(b)
-        v.addStretch()
-        return pane
-
     def _bind_shortcuts(self) -> None:
         QShortcut(QKeySequence("Ctrl+O"), self, activated=self.open_file_dialog)
         QShortcut(QKeySequence("Ctrl+S"), self, activated=self.save_current_pdf)
@@ -393,6 +405,16 @@ class MainWindow(QMainWindow):
 
     def _apply_theme(self) -> None:
         self.setStyleSheet(build_stylesheet(self.dark_theme, self.accent_color, self.accent_hover))
+        self.ribbon.refresh_icon_theme(self.dark_theme)
+        self.left_rail.refresh_icon_theme(self.dark_theme)
+        col = "#e2e8f0" if self.dark_theme else "#334155"
+        for btn, icon_name in self._right_rail_buttons:
+            btn.setIcon(make_icon(icon_name, col, 17))
+            btn.setIconSize(QSize(17, 17))
+
+    def set_mode(self, mode: str) -> None:
+        self.left_rail.set_active_mode(mode)
+        self.ribbon.set_mode(mode)
 
     def toggle_theme(self) -> None:
         self.dark_theme = not self.dark_theme
@@ -405,7 +427,7 @@ class MainWindow(QMainWindow):
         self._apply_theme()
 
     def current_tab(self) -> DocumentTab | None:
-        w = self.tabs.currentWidget()
+        w = self.doc_stack.currentWidget()
         return w if isinstance(w, DocumentTab) else None
 
     def open_file_dialog(self) -> None:
@@ -436,9 +458,12 @@ class MainWindow(QMainWindow):
         tab = DocumentTab(engine, self.accent_color, self)
         tab.verticalScrollBar().valueChanged.connect(lambda _v, t=tab: self._on_scroll(t))
         self.welcome_widget.hide()
-        self.tabs.show()
-        idx = self.tabs.addTab(tab, name)
+        self.doc_stack.show()
+        self.doc_stack.addWidget(tab)
+        idx = self.tabs.addTab(name)
+        self.tabs.setTabToolTip(idx, file_path or name)
         self.tabs.setCurrentIndex(idx)
+        self.doc_stack.setCurrentWidget(tab)
         self._rebuild_tab_pages(tab)
         self.sidebar.set_engine(engine, 0)
         self.ribbon.update_page_info(0, engine.page_count)
@@ -461,20 +486,26 @@ class MainWindow(QMainWindow):
         tab.rebuild_pages(self.tool_state, self._callbacks_for(tab))
         self.ribbon.update_page_info(tab.current_page, tab.engine.page_count)
 
-    def _on_tab_changed(self, _idx: int) -> None:
+    def _on_tab_changed(self, idx: int) -> None:
         self._hide_floating_bar()
-        tab = self.current_tab()
-        if tab is None:
+        if idx < 0 or idx >= self.doc_stack.count():
             self.sidebar.set_engine(None)
             self.ribbon.update_page_info(0, 0)
-            self.tabs.hide()
+            self.doc_stack.hide()
             self.welcome_widget.show()
+            return
+        self.doc_stack.setCurrentIndex(idx)
+        tab = self.current_tab()
+        if tab is None:
             return
         self.sidebar.set_engine(tab.engine, tab.current_page)
         self.ribbon.update_page_info(tab.current_page, tab.engine.page_count)
 
     def _close_tab(self, idx: int) -> None:
-        w = self.tabs.widget(idx)
+        if idx < 0 or idx >= self.doc_stack.count():
+            return
+        w = self.doc_stack.widget(idx)
+        self.doc_stack.removeWidget(w)
         self.tabs.removeTab(idx)
         if w:
             w.deleteLater()
@@ -482,7 +513,7 @@ class MainWindow(QMainWindow):
             self._hide_floating_bar()
             self.sidebar.set_engine(None)
             self.ribbon.update_page_info(0, 0)
-            self.tabs.hide()
+            self.doc_stack.hide()
             self.welcome_widget.show()
 
     def _on_scroll(self, tab: DocumentTab) -> None:
@@ -490,7 +521,6 @@ class MainWindow(QMainWindow):
             return
         if self._active_editor is not None:
             self._position_floating_bar()
-        # Determine visible page closest to viewport center
         v_top = tab.verticalScrollBar().value()
         v_mid = v_top + tab.viewport().height() // 3
         best = tab.current_page
@@ -545,7 +575,7 @@ class MainWindow(QMainWindow):
         bar_h = self.floating_bar.sizeHint().height()
         x = max(8, min(self.width() - bar_w - 8, top_left.x() + (ed.width() - bar_w) // 2))
         y = top_left.y() - bar_h - 6
-        if y < 60:
+        if y < 50:
             y = top_left.y() + ed.height() + 6
         self.floating_bar.move(x, y)
 
@@ -635,6 +665,7 @@ class MainWindow(QMainWindow):
         if tab:
             tab.commit_any_active_editor()
         self._hide_floating_bar()
+        self.left_rail.set_active_mode(mode)
         if mode == "view":
             self._set_active_tool("select")
         elif mode == "annotate":
@@ -677,8 +708,8 @@ class MainWindow(QMainWindow):
                 self.status_bar.showMessage("Select text on a page first to copy")
 
         elif action == "pick_color":
-            from PySide6.QtWidgets import QColorDialog
             from PySide6.QtGui import QColor
+            from PySide6.QtWidgets import QColorDialog
 
             col = QColorDialog.getColor(QColor(self.tool_state["color"]), self, "Pick Tool Color")
             if col.isValid():
@@ -754,9 +785,6 @@ class MainWindow(QMainWindow):
             dlg = OrganizerDialog(cur_bytes, self)
             if dlg.exec():
                 if dlg.extract_indices is not None:
-                    ops = [type("Op", (), {"original_index": idx, "rotation_delta": 0})() for idx in dlg.extract_indices]
-                    from app.core.document_ops import PageOp
-
                     extracted = organize_pages(cur_bytes, [PageOp(original_index=i) for i in dlg.extract_indices])
                     self.open_pdf_bytes(extracted, f"Extracted_{tab.engine.name}")
                 else:
@@ -764,8 +792,6 @@ class MainWindow(QMainWindow):
                     self._replace_tab_document(tab, new_bytes)
 
         elif action == "insert_blank":
-            from app.core.document_ops import PageOp
-
             cur_bytes = tab.engine.build_final_pdf_bytes()
             ops = [PageOp(original_index=i) for i in range(tab.engine.page_count)]
             ops.insert(tab.current_page + 1, PageOp(original_index=None))

@@ -109,17 +109,17 @@ class PDFPageWidget(QWidget):
         self.refresh_render()
 
     def refresh_render(self) -> None:
-        """Re-render PDF page pixmap from MuPDF at crisp HiDPI resolution."""
+        """Re-render PDF page pixmap from MuPDF onto crisp white paper at HiDPI resolution."""
         if self.page_idx >= self.engine.page_count:
             return
         w_pt, h_pt = self.engine.get_page_size(self.page_idx)
         self._page_w_pt, self._page_h_pt = w_pt, h_pt
 
         dpr = max(1.0, float(self.devicePixelRatioF()))
-        samples, px_w, px_h = self.engine.render_page_rgba(
+        samples, px_w, px_h, stride = self.engine.render_page_rgb(
             self.page_idx, zoom=self.zoom * dpr, rotation=self.rotation
         )
-        img = QImage(samples, px_w, px_h, px_w * 4, QImage.Format_RGBA8888).copy()
+        img = QImage(samples, px_w, px_h, stride, QImage.Format_RGB888).copy()
         img.setDevicePixelRatio(dpr)
         self._pixmap = QPixmap.fromImage(img)
 
@@ -622,8 +622,12 @@ class PDFPageWidget(QWidget):
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
+        # Always paint uniform solid white paper before drawing PDF content
+        painter.fillRect(self.rect(), QColor("#ffffff"))
         if self._pixmap is not None:
             painter.drawPixmap(0, 0, self._pixmap)
+        painter.setPen(QPen(QColor("#cbd5e1"), 1))
+        painter.drawRect(0, 0, self.width() - 1, self.height() - 1)
 
         # 1. Search highlights
         for idx, hit in enumerate(self.search_hits):

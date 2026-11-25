@@ -363,6 +363,16 @@ class PDFDocumentEngine:
         p = doc[max(0, min(page_idx, len(doc) - 1))]
         return float(p.rect.width), float(p.rect.height)
 
+    def render_page_rgb(
+        self, page_idx: int, zoom: float = 1.0, rotation: int = 0
+    ) -> tuple[bytes, int, int, int]:
+        """Render page composited onto solid white paper (RGB888) so transparent areas never turn grey."""
+        doc = self._get_preview_doc()
+        page = doc[max(0, min(page_idx, len(doc) - 1))]
+        mat = pymupdf.Matrix(zoom, zoom).prerotate(rotation % 360)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        return pix.samples, pix.width, pix.height, pix.stride
+
     def render_page_rgba(
         self, page_idx: int, zoom: float = 1.0, rotation: int = 0
     ) -> tuple[bytes, int, int]:
@@ -371,6 +381,13 @@ class PDFDocumentEngine:
         mat = pymupdf.Matrix(zoom, zoom).prerotate(rotation % 360)
         pix = page.get_pixmap(matrix=mat, alpha=True)
         return pix.samples, pix.width, pix.height
+
+    def render_thumbnail_rgb(self, page_idx: int, max_width: int = 150) -> tuple[bytes, int, int, int]:
+        doc = self._get_preview_doc()
+        page = doc[max(0, min(page_idx, len(doc) - 1))]
+        zoom = max_width / max(1.0, page.rect.width)
+        pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+        return pix.samples, pix.width, pix.height, pix.stride
 
     def render_thumbnail_rgba(self, page_idx: int, max_width: int = 150) -> tuple[bytes, int, int]:
         doc = self._get_preview_doc()

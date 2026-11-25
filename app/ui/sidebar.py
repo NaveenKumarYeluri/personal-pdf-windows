@@ -92,8 +92,8 @@ class SidebarPanel(QFrame):
         if self._engine is None or self._engine.needs_password:
             return
         for pno in range(self._engine.page_count):
-            samples, w, h = self._engine.render_thumbnail_rgba(pno, max_width=132)
-            qimg = QImage(samples, w, h, w * 4, QImage.Format_RGBA8888).copy()
+            samples, w, h, stride = self._engine.render_thumbnail_rgb(pno, max_width=132)
+            qimg = QImage(samples, w, h, stride, QImage.Format_RGB888).copy()
             item = QListWidgetItem(QIcon(QPixmap.fromImage(qimg)), f"Page {pno + 1}")
             item.setData(Qt.UserRole, pno)
             item.setTextAlignment(Qt.AlignHCenter)
