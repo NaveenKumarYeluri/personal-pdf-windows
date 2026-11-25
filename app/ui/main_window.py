@@ -105,6 +105,7 @@ class DocumentTab(QScrollArea):
         self.setWidget(self.pages_container)
 
         self.page_widgets: list[PDFPageWidget] = []
+        self._programmatic_scroll: bool = False
 
     def calculate_fit_zoom(self) -> float:
         if self.engine.page_count == 0:
@@ -168,9 +169,24 @@ class DocumentTab(QScrollArea):
             pw.update()
 
     def scroll_to_page(self, page_idx: int) -> None:
-        if 0 <= page_idx < len(self.page_widgets):
+        if not (0 <= page_idx < len(self.page_widgets)):
+            return
+        for _ in range(6):
+            ready = self.page_widgets[page_idx].isVisible() and (
+                page_idx == 0 or self.page_widgets[page_idx].y() > self.page_widgets[page_idx - 1].y()
+            )
+            if ready and (self.pages_layout.sizeHint().height() <= self.viewport().height() or self.verticalScrollBar().maximum() > 0):
+                break
+            QApplication.processEvents()
+        self.pages_layout.activate()
+        pw = self.page_widgets[page_idx]
+        target_y = max(0, pw.y() - 12)
+        self._programmatic_scroll = True
+        try:
             self.current_page = page_idx
-            self.ensureWidgetVisible(self.page_widgets[page_idx], 0, 20)
+            self.verticalScrollBar().setValue(target_y)
+        finally:
+            self._programmatic_scroll = False
 
     def commit_any_active_editor(self) -> None:
         for pw in self.page_widgets:
@@ -467,6 +483,7 @@ class MainWindow(QMainWindow):
         self._rebuild_tab_pages(tab)
         self.sidebar.set_engine(engine, 0)
         self.ribbon.update_page_info(0, engine.page_count)
+        self.ribbon.set_zoom_label(tab.zoom_mode)
         self.status_bar.showMessage(f"Opened {name} ({engine.page_count} pages)")
         return tab
 
@@ -500,6 +517,9 @@ class MainWindow(QMainWindow):
             return
         self.sidebar.set_engine(tab.engine, tab.current_page)
         self.ribbon.update_page_info(tab.current_page, tab.engine.page_count)
+        self.ribbon.set_zoom_label(
+            tab.zoom_mode if tab.zoom_mode in ("Fit Width", "Fit Page") else f"{int(round(tab.zoom * 100))}%"
+        )
 
     def _close_tab(self, idx: int) -> None:
         if idx < 0 or idx >= self.doc_stack.count():
@@ -521,14 +541,19 @@ class MainWindow(QMainWindow):
             return
         if self._active_editor is not None:
             self._position_floating_bar()
-        v_top = tab.verticalScrollBar().value()
+        if tab._programmatic_scroll:
+            return
+        vbar = tab.verticalScrollBar()
+        v_top = vbar.value()
         v_mid = v_top + tab.viewport().height() // 3
         best = tab.current_page
         for pw in tab.page_widgets:
             y = pw.y()
-            if y <= v_mid <= y + pw.height():
+            if y - 8 <= v_mid <= y + pw.height() + 8:
                 best = pw.page_idx
                 break
+        if vbar.maximum() > 0 and v_top >= vbar.maximum() - 4:
+            best = len(tab.page_widgets) - 1
         if best != tab.current_page:
             tab.current_page = best
             self.ribbon.update_page_info(best, tab.engine.page_count)
@@ -1023,6 +1048,7 @@ class MainWindow(QMainWindow):
             tab.zoom_mode = "custom"
             tab.zoom = max(0.25, min(4.0, int(label[:-1]) / 100.0))
         tab.refresh_all_pages()
+        self.ribbon.set_zoom_label(label)
 
     def step_zoom(self, factor: float) -> None:
         tab = self.current_tab()
@@ -1031,6 +1057,7 @@ class MainWindow(QMainWindow):
         tab.zoom_mode = "custom"
         tab.zoom = max(0.25, min(4.0, tab.zoom * factor))
         tab.refresh_all_pages()
+        self.ribbon.set_zoom_label(f"{int(round(tab.zoom * 100))}%")
 
     def rotate_clockwise(self) -> None:
         tab = self.current_tab()

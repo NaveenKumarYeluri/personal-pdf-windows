@@ -35,6 +35,46 @@ def test_gui_load_search_theme_and_sequential_in_place_editing(qtbot, tmp_path):
     assert (margin_px.red(), margin_px.green(), margin_px.blue()) == (255, 255, 255)
     assert (body_gap_px.red(), body_gap_px.green(), body_gap_px.blue()) == (255, 255, 255)
 
+    # 1b. Modern page navigation (Down/Next & Up/Prev) and Fit Width zoom pill
+    assert win.ribbon.page_input.text() == "1"
+    assert win.ribbon.btn_zoom_mode.text() == "Fit Width"
+    win.ribbon.btn_next.click()
+    qtbot.wait(20)
+    assert tab.current_page == 1
+    assert win.ribbon.page_input.text() == "2"
+    assert abs(tab.verticalScrollBar().value() - (tab.page_widgets[1].y() - 12)) <= 2
+
+    win.ribbon.btn_next.click()
+    qtbot.wait(20)
+    assert tab.current_page == 2
+    assert win.ribbon.page_input.text() == "3"
+
+    # Clicking Up (btn_prev) MUST go to previous page (Page 2, index 1), NOT forward!
+    win.ribbon.btn_prev.click()
+    qtbot.wait(20)
+    assert tab.current_page == 1
+    assert win.ribbon.page_input.text() == "2"
+    assert abs(tab.verticalScrollBar().value() - (tab.page_widgets[1].y() - 12)) <= 2
+
+    win.ribbon.btn_prev.click()
+    qtbot.wait(20)
+    assert tab.current_page == 0
+    assert win.ribbon.page_input.text() == "1"
+
+    # Typing page number + Enter jumps cleanly, then reset back to Page 1
+    win.ribbon.page_input.setText("4")
+    QTest.keyClick(win.ribbon.page_input, Qt.Key_Return)
+    qtbot.wait(20)
+    assert tab.current_page == 3
+    win.go_to_page(0)
+
+    # Zoom menu pill updates when stepping zoom and switching back to Fit Width
+    win.ribbon.btn_zoom_in.click()
+    assert win.ribbon.btn_zoom_mode.text().endswith("%")
+    win.ribbon._zoom_actions["Fit Width"].trigger()
+    assert win.ribbon.btn_zoom_mode.text() == "Fit Width"
+    assert tab.zoom_mode == "Fit Width"
+
     # 2. Search functionality
     win.ribbon.search_input.setText("Heap")
     assert len(tab.search_hits) > 0

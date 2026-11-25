@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 ACCENT_PRESETS: list[tuple[str, str, str]] = [
     ("Acrobat Red", "#ea2e3f", "#d22333"),
     ("Royal Blue", "#2563eb", "#1d4ed8"),
@@ -13,7 +16,16 @@ ACCENT_PRESETS: list[tuple[str, str, str]] = [
 ]
 
 
+def _icon_url(filename: str) -> str:
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
+    return (base / "assets" / "icons" / filename).as_posix()
+
+
 def build_stylesheet(dark: bool = False, accent: str = "#ea2e3f", accent_hover: str = "#d22333") -> str:
+    mode = "dark" if dark else "light"
+    chev_down = _icon_url(f"chevron-down-{mode}.svg")
+    chev_up = _icon_url(f"chevron-up-{mode}.svg")
+
     if dark:
         bg_app = "#1b1c20"
         bg_bar = "#25262c"
@@ -128,6 +140,73 @@ def build_stylesheet(dark: bool = False, accent: str = "#ea2e3f", accent_hover: 
         border-radius: 6px;
         padding: 4px 10px;
     }}
+    QFrame#TopDivider {{
+        background-color: {border};
+        max-width: 1px;
+        min-width: 1px;
+        margin: 6px 4px;
+    }}
+    QPushButton#MenuBtn {{
+        background-color: transparent;
+        border: 1px solid transparent;
+        border-radius: 6px;
+        padding: 4px 20px 4px 8px;
+        font-weight: 600;
+    }}
+    QPushButton#MenuBtn:hover {{
+        background-color: {bg_hover};
+    }}
+    QPushButton#MenuBtn::menu-indicator,
+    QPushButton#ZoomMenuBtn::menu-indicator {{
+        image: url({chev_down});
+        width: 12px;
+        height: 12px;
+        subcontrol-position: right center;
+        subcontrol-origin: padding;
+        right: 6px;
+    }}
+    QPushButton#ZoomMenuBtn {{
+        background-color: {bg_input};
+        color: {text_primary};
+        border: 1px solid {border};
+        border-radius: 6px;
+        padding: 0px 22px 0px 8px;
+        min-height: 26px;
+        max-height: 28px;
+        font-weight: 500;
+        text-align: left;
+    }}
+    QPushButton#ZoomMenuBtn:hover {{
+        background-color: {bg_hover};
+        border-color: {accent};
+    }}
+    QLineEdit#PageInput {{
+        background-color: {bg_input};
+        color: {text_primary};
+        border: 1px solid {border};
+        border-radius: 6px;
+        padding: 0px 4px;
+        min-height: 24px;
+        max-height: 26px;
+        font-weight: 600;
+    }}
+    QLineEdit#PageInput:focus {{
+        border-color: {accent};
+        background-color: {bg_bar};
+    }}
+    QLineEdit#SearchInput {{
+        background-color: {bg_input};
+        color: {text_primary};
+        border: 1px solid {border};
+        border-radius: 13px;
+        padding: 0px 10px;
+        min-height: 24px;
+        max-height: 26px;
+    }}
+    QLineEdit#SearchInput:focus {{
+        border-color: {accent};
+        background-color: {bg_bar};
+    }}
     QComboBox, QSpinBox, QLineEdit {{
         background-color: {bg_input};
         color: {text_primary};
@@ -136,8 +215,69 @@ def build_stylesheet(dark: bool = False, accent: str = "#ea2e3f", accent_hover: 
         padding: 3px 8px;
         min-height: 24px;
     }}
+    QComboBox {{
+        padding-right: 24px;
+    }}
+    QComboBox::drop-down {{
+        subcontrol-origin: padding;
+        subcontrol-position: top right;
+        width: 20px;
+        border: none;
+        background: transparent;
+    }}
+    QComboBox::down-arrow {{
+        image: url({chev_down});
+        width: 12px;
+        height: 12px;
+    }}
+    QComboBox QAbstractItemView {{
+        background-color: {bg_bar};
+        color: {text_primary};
+        border: 1px solid {border};
+        border-radius: 6px;
+        selection-background-color: {accent};
+        selection-color: #ffffff;
+        padding: 4px;
+    }}
+    QSpinBox {{
+        padding-right: 20px;
+    }}
+    QSpinBox::up-button, QSpinBox::down-button {{
+        subcontrol-origin: border;
+        width: 16px;
+        border: none;
+        background: transparent;
+    }}
+    QSpinBox::up-button {{
+        subcontrol-position: top right;
+        margin-top: 2px;
+        margin-right: 2px;
+    }}
+    QSpinBox::down-button {{
+        subcontrol-position: bottom right;
+        margin-bottom: 2px;
+        margin-right: 2px;
+    }}
+    QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+        background-color: {bg_hover};
+        border-radius: 3px;
+    }}
+    QSpinBox::up-arrow {{
+        image: url({chev_up});
+        width: 10px;
+        height: 10px;
+    }}
+    QSpinBox::down-arrow {{
+        image: url({chev_down});
+        width: 10px;
+        height: 10px;
+    }}
     QComboBox:focus, QLineEdit:focus, QSpinBox:focus {{
         border-color: {accent};
+    }}
+    QTabBar#InlineDocTabs {{
+        background: transparent;
+        border: none;
     }}
     QTabBar#InlineDocTabs::tab {{
         background-color: transparent;
@@ -214,5 +354,14 @@ def build_stylesheet(dark: bool = False, accent: str = "#ea2e3f", accent_hover: 
         background-color: #ffffff;
         color: #0f172a;
         border: 1px solid #cbd5e1;
+    }}
+    QFrame#FloatingFormatBar QComboBox::down-arrow {{
+        image: url({_icon_url("chevron-down-light.svg")});
+    }}
+    QFrame#FloatingFormatBar QSpinBox::up-arrow {{
+        image: url({_icon_url("chevron-up-light.svg")});
+    }}
+    QFrame#FloatingFormatBar QSpinBox::down-arrow {{
+        image: url({_icon_url("chevron-down-light.svg")});
     }}
     """

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QAction, QActionGroup, QIntValidator
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -12,7 +13,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QPushButton,
-    QSpinBox,
     QTabBar,
     QToolButton,
     QVBoxLayout,
@@ -82,6 +82,8 @@ class RibbonHeader(QWidget):
         tb.addWidget(badge)
 
         self.btn_menu = QPushButton("Menu")
+        self.btn_menu.setObjectName("MenuBtn")
+        self.btn_menu.setFixedHeight(28)
         self.btn_menu.setToolTip("File, View & Preferences")
         self._build_main_menu()
         tb.addWidget(self.btn_menu)
@@ -97,39 +99,54 @@ class RibbonHeader(QWidget):
         # Inline Document Tabs right inside the Top Bar
         self.inline_tabs = QTabBar()
         self.inline_tabs.setObjectName("InlineDocTabs")
+        self.inline_tabs.setDrawBase(False)
         self.inline_tabs.setTabsClosable(True)
         self.inline_tabs.setMovable(True)
         self.inline_tabs.setExpanding(False)
         self.inline_tabs.setElideMode(Qt.ElideRight)
         tb.addWidget(self.inline_tabs, stretch=1)
 
-        # Compact Page Navigation
-        self.btn_prev = self._icon_btn("prev", "Previous Page", self.prevPageClicked.emit, size=14)
-        self.page_spin = QSpinBox()
-        self.page_spin.setRange(1, 1)
-        self.page_spin.setFixedWidth(50)
-        self.page_spin.valueChanged.connect(lambda v: self.pageJumpRequested.emit(v - 1))
+        # Compact Acrobat Page Navigation (↑ Prev Page | ↓ Next Page | [page] / total)
+        self._total_pages = 0
+        self._current_page_one = 1
+        self.btn_prev = self._icon_btn("page_up", "Previous Page (Up)", self.prevPageClicked.emit, size=15)
+        self.btn_next = self._icon_btn("page_down", "Next Page (Down)", self.nextPageClicked.emit, size=15)
+        self.page_input = QLineEdit("1")
+        self.page_input.setObjectName("PageInput")
+        self.page_input.setValidator(QIntValidator(1, 99999, self))
+        self.page_input.setAlignment(Qt.AlignCenter)
+        self.page_input.setFixedSize(40, 26)
+        self.page_input.setToolTip("Type a page number and press Enter")
+        self.page_input.returnPressed.connect(self._commit_page_input)
         self.lbl_page_total = QLabel("/ 0")
         self.lbl_page_total.setStyleSheet("padding: 0 3px; font-size:12px;")
-        self.btn_next = self._icon_btn("next", "Next Page", self.nextPageClicked.emit, size=14)
-        for w in (self.btn_prev, self.page_spin, self.lbl_page_total, self.btn_next):
+        for w in (self.btn_prev, self.btn_next, self.page_input, self.lbl_page_total):
             tb.addWidget(w)
 
-        # Compact Zoom & Rotate
+        tb.addWidget(self._make_divider())
+
+        # Modern Acrobat Zoom Menu Pill & Rotate
         self.btn_zoom_out = self._icon_btn("zoom_out", "Zoom Out (Ctrl+-)", self.zoomOutClicked.emit, size=15)
-        self.zoom_combo = QComboBox()
-        self.zoom_combo.addItems(["Fit Width", "Fit Page", "75%", "100%", "125%", "150%", "200%", "300%"])
-        self.zoom_combo.setFixedWidth(92)
-        self.zoom_combo.currentTextChanged.connect(self.zoomModeChanged.emit)
+        self.btn_zoom_mode = QPushButton("Fit Width")
+        self.btn_zoom_mode.setObjectName("ZoomMenuBtn")
+        self.btn_zoom_mode.setFixedSize(110, 28)
+        self.btn_zoom_mode.setIcon(make_icon("fit_width", self._icon_color, 14))
+        self.btn_zoom_mode.setIconSize(QSize(14, 14))
+        self.btn_zoom_mode.setToolTip("Zoom Level & Page Fit")
+        self._zoom_actions: dict[str, QAction] = {}
+        self._build_zoom_menu()
         self.btn_zoom_in = self._icon_btn("zoom_in", "Zoom In (Ctrl+=)", self.zoomInClicked.emit, size=15)
         self.btn_rotate = self._icon_btn("rotate", "Rotate 90° CW", self.rotateCWClicked.emit, size=15)
-        for w in (self.btn_zoom_out, self.zoom_combo, self.btn_zoom_in, self.btn_rotate):
+        for w in (self.btn_zoom_out, self.btn_zoom_mode, self.btn_zoom_in, self.btn_rotate):
             tb.addWidget(w)
+
+        tb.addWidget(self._make_divider())
 
         # Compact Search Pill
         self.search_input = QLineEdit()
+        self.search_input.setObjectName("SearchInput")
         self.search_input.setPlaceholderText("Find (Ctrl+F)...")
-        self.search_input.setFixedWidth(135)
+        self.search_input.setFixedSize(135, 26)
         self.search_input.textChanged.connect(self.searchChanged.emit)
         self.lbl_search_count = QLabel("0/0")
         self.lbl_search_count.setStyleSheet("font-size:11px; padding:0 2px;")
@@ -174,9 +191,54 @@ class RibbonHeader(QWidget):
             accent_sub.addAction(name, lambda c=col, h=hov: self.accentChanged.emit(c, h))
         self.btn_menu.setMenu(menu)
 
+    @staticmethod
+    def _make_divider() -> QFrame:
+        sep = QFrame()
+        sep.setObjectName("TopDivider")
+        sep.setFixedSize(1, 20)
+        return sep
+
+    def _build_zoom_menu(self) -> None:
+        menu = QMenu(self)
+        grp = QActionGroup(menu)
+        grp.setExclusive(True)
+        presets = ["Fit Width", "Fit Page", None, "75%", "100%", "125%", "150%", "200%", "300%"]
+        for item in presets:
+            if item is None:
+                menu.addSeparator()
+                continue
+            act = QAction(item, menu)
+            act.setCheckable(True)
+            act.setChecked(item == "Fit Width")
+            act.triggered.connect(lambda _chk=False, lbl=item: self._select_zoom_preset(lbl))
+            grp.addAction(act)
+            menu.addAction(act)
+            self._zoom_actions[item] = act
+        self.btn_zoom_mode.setMenu(menu)
+
+    def _select_zoom_preset(self, label: str) -> None:
+        self.set_zoom_label(label)
+        self.zoomModeChanged.emit(label)
+
+    def set_zoom_label(self, label: str) -> None:
+        self.btn_zoom_mode.setText(label)
+        for key, act in self._zoom_actions.items():
+            act.setChecked(key == label)
+
+    def _commit_page_input(self) -> None:
+        txt = self.page_input.text().strip()
+        if not txt or self._total_pages <= 0:
+            self.page_input.setText(str(self._current_page_one))
+            return
+        target = min(max(1, int(txt)), self._total_pages)
+        self.page_input.setText(str(target))
+        self.pageJumpRequested.emit(target - 1)
+        self.page_input.clearFocus()
+
     def refresh_icon_theme(self, dark: bool) -> None:
         self._icon_color = "#e2e8f0" if dark else "#334155"
         self.btn_menu.setIcon(make_icon("menu", self._icon_color, 15))
+        self.btn_zoom_mode.setIcon(make_icon("fit_width", self._icon_color, 14))
         for btn, icon_name in self._tool_buttons:
             btn.setIcon(make_icon(icon_name, self._icon_color, btn.iconSize().width()))
 
@@ -186,11 +248,13 @@ class RibbonHeader(QWidget):
         self.modeChanged.emit(mode)
 
     def update_page_info(self, current_zero: int, total: int) -> None:
-        self.page_spin.blockSignals(True)
-        self.page_spin.setRange(1, max(1, total))
-        self.page_spin.setValue(min(max(1, current_zero + 1), max(1, total)))
-        self.page_spin.blockSignals(False)
+        self._total_pages = max(0, total)
+        cur = min(max(1, current_zero + 1), max(1, total)) if total > 0 else 0
+        self._current_page_one = cur
+        self.page_input.setText(str(cur) if total > 0 else "0")
         self.lbl_page_total.setText(f"/ {total}")
+        self.btn_prev.setEnabled(total > 0 and current_zero > 0)
+        self.btn_next.setEnabled(total > 0 and current_zero < total - 1)
 
     def _clear_dynamic_tools(self) -> None:
         while self.dynamic_layout.count():

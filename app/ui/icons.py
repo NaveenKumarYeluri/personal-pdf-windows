@@ -37,6 +37,9 @@ _SVGS: dict[str, str] = {
     "chevron_right": '<polyline points="9 18 15 12 9 6"/>',
     "up": '<polyline points="18 15 12 9 6 15"/>',
     "down": '<polyline points="6 9 12 15 18 9"/>',
+    "page_up": '<path d="M12 19V5"/><polyline points="6 11 12 5 18 11"/>',
+    "page_down": '<path d="M12 5v14"/><polyline points="6 13 12 19 18 13"/>',
+    "fit_width": '<path d="M4 5v14"/><path d="M20 5v14"/><polyline points="9 8 5 12 9 16"/><polyline points="15 8 19 12 15 16"/><line x1="6" y1="12" x2="18" y2="12"/>',
 }
 
 
