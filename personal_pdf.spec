@@ -1,26 +1,31 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
-datas = [('assets', 'assets')]
-binaries = []
-hiddenimports = ['PyMuPDF', 'pymupdf']
-
-for pkg in ('pymupdf',):
-    d, b, h = collect_all(pkg)
-    datas += d
-    binaries += b
-    hiddenimports += h
+datas = [('assets', 'assets')] + collect_data_files('pymupdf')
+binaries = collect_dynamic_libs('pymupdf')
 
 a = Analysis(
     ['app/main.py'],
     pathex=['.'],
     binaries=binaries,
     datas=datas,
-    hiddenimports=hiddenimports,
+    hiddenimports=['pymupdf', 'PIL', 'numpy'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        'IPython',
+        'matplotlib',
+        'pandas',
+        'scipy',
+        'tkinter',
+        'pytest',
+        'playwright',
+        'pyarrow',
+        'polars',
+        'SQLAlchemy',
+        'onnxruntime',
+    ],
     noarchive=False,
 )
 pyz = PYZ(a.pure)

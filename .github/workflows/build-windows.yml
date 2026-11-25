@@ -31,7 +31,7 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
-          pytest -v
+          python -m pytest -v
 
       - name: Build Standalone Windows Executable
         run: |
