@@ -76,6 +76,7 @@ class _UndoEntry:
     page_idx: int
     payload: object
     previous_payload: object | None = None
+    action: str = "add"
 
 
 class DocumentTab(QScrollArea):
@@ -711,6 +712,8 @@ class MainWindow(QMainWindow):
         self.sidebar.refresh_annotations()
 
     def _on_annot_removed(self, tab: DocumentTab, page_idx: int, kind: str, item: object) -> None:
+        tab.undo_stack.append(_UndoEntry(kind=kind, page_idx=page_idx, payload=item, action="remove"))
+        tab.redo_stack.clear()
         self.sidebar.refresh_annotations()
 
     def undo(self) -> None:
@@ -718,6 +721,8 @@ class MainWindow(QMainWindow):
         if tab is None or not tab.undo_stack:
             return
         tab.commit_any_active_editor()
+        if not tab.undo_stack:
+            return
         entry = tab.undo_stack.pop()
         tab.redo_stack.append(entry)
         if entry.kind == "in_place_edit":
@@ -727,11 +732,21 @@ class MainWindow(QMainWindow):
             else:
                 tab.engine.remove_in_place_edit(entry.page_idx, op.block_id)
             self._rebuild_tab_pages(tab)
+            self.sidebar.refresh_thumbnails()
         else:
             store = self._store_for_kind(tab.engine, entry.kind)
-            lst = store.get(entry.page_idx, [])
-            if entry.payload in lst:
-                lst.remove(entry.payload)
+            lst = store.setdefault(entry.page_idx, [])
+            if entry.action == "remove":
+                if entry.payload not in lst:
+                    lst.append(entry.payload)
+            else:
+                if entry.payload in lst:
+                    lst.remove(entry.payload)
+                    if (
+                        0 <= entry.page_idx < len(tab.page_widgets)
+                        and tab.page_widgets[entry.page_idx].selected_item is entry.payload
+                    ):
+                        tab.page_widgets[entry.page_idx].selected_item = None
             if entry.page_idx < len(tab.page_widgets):
                 tab.page_widgets[entry.page_idx].update()
         self.sidebar.refresh_annotations()
@@ -749,9 +764,21 @@ class MainWindow(QMainWindow):
         if entry.kind == "in_place_edit":
             tab.engine.set_in_place_edit(entry.payload)
             self._rebuild_tab_pages(tab)
+            self.sidebar.refresh_thumbnails()
         else:
             store = self._store_for_kind(tab.engine, entry.kind)
-            store.setdefault(entry.page_idx, []).append(entry.payload)
+            lst = store.setdefault(entry.page_idx, [])
+            if entry.action == "remove":
+                if entry.payload in lst:
+                    lst.remove(entry.payload)
+                    if (
+                        0 <= entry.page_idx < len(tab.page_widgets)
+                        and tab.page_widgets[entry.page_idx].selected_item is entry.payload
+                    ):
+                        tab.page_widgets[entry.page_idx].selected_item = None
+            else:
+                if entry.payload not in lst:
+                    lst.append(entry.payload)
             if entry.page_idx < len(tab.page_widgets):
                 tab.page_widgets[entry.page_idx].update()
         self.sidebar.refresh_annotations()

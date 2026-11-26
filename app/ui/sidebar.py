@@ -141,6 +141,26 @@ class SidebarPanel(QFrame):
                 item = QListWidgetItem(f"🖍️ {len(strokes)} ink/highlight stroke(s) (p.{pno + 1})")
                 item.setData(Qt.UserRole, pno)
                 self.annot_list.addItem(item)
+        for pno, shapes in sorted(self._engine.shapes.items()):
+            if shapes:
+                item = QListWidgetItem(f"📐 {len(shapes)} shape(s) (p.{pno + 1})")
+                item.setData(Qt.UserRole, pno)
+                self.annot_list.addItem(item)
+        for pno, markups in sorted(self._engine.markups.items()):
+            if markups:
+                item = QListWidgetItem(f"🔖 {len(markups)} text markup(s) (p.{pno + 1})")
+                item.setData(Qt.UserRole, pno)
+                self.annot_list.addItem(item)
+        for pno, wbs in sorted(self._engine.whiteouts.items()):
+            if wbs:
+                item = QListWidgetItem(f"⬜ {len(wbs)} whiteout box(es) (p.{pno + 1})")
+                item.setData(Qt.UserRole, pno)
+                self.annot_list.addItem(item)
+        for pno, rbs in sorted(self._engine.redactions.items()):
+            if rbs:
+                item = QListWidgetItem(f"⬛ {len(rbs)} redaction area(s) (p.{pno + 1})")
+                item.setData(Qt.UserRole, pno)
+                self.annot_list.addItem(item)
         if self.annot_list.count() == 0:
             self.annot_list.addItem("No edits or annotations yet")
 

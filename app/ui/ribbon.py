@@ -319,6 +319,7 @@ class RibbonHeader(QWidget):
                 ("Rect", "tool:rect", False),
                 ("Circle", "tool:ellipse", False),
                 ("Line", "tool:line", False),
+                ("Arrow", "tool:arrow", False),
                 ("Eraser", "tool:eraser", False),
             ]:
                 b = self._add_tool_btn(label, tname, checkable=True, checked=chk)
@@ -326,9 +327,15 @@ class RibbonHeader(QWidget):
             self._add_tool_btn("Color", "pick_color")
             stamp_combo = QComboBox()
             stamp_combo.addItems(["Stamp...", "APPROVED", "REJECTED", "CONFIDENTIAL", "DRAFT", "FINAL", "PAID", "Custom..."])
-            stamp_combo.currentTextChanged.connect(
-                lambda val: val != "Stamp..." and self.toolAction.emit("place_stamp", {"label": val})
-            )
+            def _on_stamp_picked(val: str, cb: QComboBox = stamp_combo) -> None:
+                if val == "Stamp...":
+                    return
+                self.toolAction.emit("place_stamp", {"label": val})
+                cb.blockSignals(True)
+                cb.setCurrentIndex(0)
+                cb.blockSignals(False)
+
+            stamp_combo.currentTextChanged.connect(_on_stamp_picked)
             self.dynamic_layout.addWidget(stamp_combo)
 
         elif mode == "organize":
