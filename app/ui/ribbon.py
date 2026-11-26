@@ -30,7 +30,9 @@ class RibbonHeader(QWidget):
     - Slim 34px Contextual Bar shown only when active mode has sub-tools (hidden in View mode).
     """
 
+    newClicked = Signal()
     openClicked = Signal()
+    recentFileClicked = Signal(str)
     saveClicked = Signal()
     saveAsClicked = Signal()
     printClicked = Signal()
@@ -179,7 +181,10 @@ class RibbonHeader(QWidget):
 
     def _build_main_menu(self) -> None:
         menu = QMenu(self)
+        menu.addAction("New Blank PDF (Ctrl+N)", self.newClicked.emit)
         menu.addAction("Open PDF... (Ctrl+O)", self.openClicked.emit)
+        self.recent_menu = menu.addMenu("Recent Files")
+        self.update_recent_files([])
         menu.addAction("Save (Ctrl+S)", self.saveClicked.emit)
         menu.addAction("Save As... (Ctrl+Shift+S)", self.saveAsClicked.emit)
         menu.addAction("Print... (Ctrl+P)", self.printClicked.emit)
@@ -190,6 +195,16 @@ class RibbonHeader(QWidget):
         for name, col, hov in ACCENT_PRESETS:
             accent_sub.addAction(name, lambda c=col, h=hov: self.accentChanged.emit(c, h))
         self.btn_menu.setMenu(menu)
+
+    def update_recent_files(self, paths: list[str]) -> None:
+        self.recent_menu.clear()
+        if not paths:
+            empty = self.recent_menu.addAction("No recent files")
+            empty.setEnabled(False)
+            return
+        for fp in paths:
+            act = self.recent_menu.addAction(fp)
+            act.triggered.connect(lambda _chk=False, p=fp: self.recentFileClicked.emit(p))
 
     @staticmethod
     def _make_divider() -> QFrame:

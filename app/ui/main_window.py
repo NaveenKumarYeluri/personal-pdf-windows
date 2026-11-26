@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import pymupdf
 import shiboken6
-from PySide6.QtCore import QPoint, QSize, Qt
+from PySide6.QtCore import QPoint, QSettings, QSize, Qt
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QImage, QKeySequence, QPainter, QShortcut
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
@@ -50,6 +50,7 @@ from app.core.models import SearchHit, StampItem, TextEditOp
 from app.core.pdf_engine import (
     PDFDocumentEngine,
     build_pdf_from_word_flow_html,
+    create_blank_pdf_bytes,
     create_sample_pdf_bytes,
 )
 from app.ui.dialogs import (
@@ -111,6 +112,8 @@ class DocumentTab(QScrollArea):
 
         self.page_widgets: list[PDFPageWidget] = []
         self._programmatic_scroll: bool = False
+        self.dirty: bool = False
+        self.base_modified: bool = False
 
     def calculate_fit_zoom(self) -> float:
         if self.engine.page_count == 0:
@@ -262,6 +265,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._bind_shortcuts()
         self._apply_theme()
+        self.ribbon.update_recent_files(self._load_recent_files())
 
         if initial_file and os.path.isfile(initial_file):
             self.open_pdf_path(initial_file)
@@ -336,7 +340,9 @@ class MainWindow(QMainWindow):
         # Wire header & left rail signals
         self.left_rail.modeSelected.connect(self.set_mode)
         self.left_rail.toolAction.connect(self._on_tool_action)
+        self.ribbon.newClicked.connect(self.new_blank_pdf)
         self.ribbon.openClicked.connect(self.open_file_dialog)
+        self.ribbon.recentFileClicked.connect(self.open_pdf_path)
         self.ribbon.saveClicked.connect(self.save_current_pdf)
         self.ribbon.saveAsClicked.connect(self.save_as_current_pdf)
         self.ribbon.printClicked.connect(self.print_current_pdf)
@@ -359,7 +365,7 @@ class MainWindow(QMainWindow):
         self.ribbon.toolAction.connect(self._on_tool_action)
 
         self.sidebar.pageSelected.connect(self.go_to_page)
-        self.sidebar.bookmarkAdded.connect(lambda t, p: self.status_bar.showMessage(f"Bookmark added: {t} (Page {p + 1})"))
+        self.sidebar.bookmarkAdded.connect(self._on_bookmark_added)
 
     def _build_right_nav_rail(self) -> QFrame:
         rail = QFrame()
@@ -420,11 +426,16 @@ class MainWindow(QMainWindow):
         btn_open.setObjectName("PrimaryBtn")
         btn_open.setMinimumHeight(38)
         btn_open.clicked.connect(self.open_file_dialog)
+        btn_new = QPushButton("New Blank PDF")
+        btn_new.setObjectName("PillBtn")
+        btn_new.setMinimumHeight(38)
+        btn_new.clicked.connect(self.new_blank_pdf)
         btn_sample = QPushButton("Load Sample PDF")
         btn_sample.setObjectName("PillBtn")
         btn_sample.setMinimumHeight(38)
         btn_sample.clicked.connect(self.load_sample_pdf)
         row.addWidget(btn_open)
+        row.addWidget(btn_new)
         row.addWidget(btn_sample)
 
         hint = QLabel("Tip: You can also drag and drop a PDF file anywhere into this window.")
@@ -438,16 +449,20 @@ class MainWindow(QMainWindow):
         return w
 
     def _bind_shortcuts(self) -> None:
+        QShortcut(QKeySequence("Ctrl+N"), self, activated=self.new_blank_pdf)
         QShortcut(QKeySequence("Ctrl+O"), self, activated=self.open_file_dialog)
         QShortcut(QKeySequence("Ctrl+S"), self, activated=self.save_current_pdf)
         QShortcut(QKeySequence("Ctrl+Shift+S"), self, activated=self.save_as_current_pdf)
         QShortcut(QKeySequence("Ctrl+P"), self, activated=self.print_current_pdf)
+        QShortcut(QKeySequence("Ctrl+W"), self, activated=lambda: self._close_tab(self.tabs.currentIndex()))
         QShortcut(QKeySequence("Ctrl+F"), self, activated=lambda: self.ribbon.search_input.setFocus())
         QShortcut(QKeySequence("Ctrl+C"), self, activated=self._shortcut_copy)
         QShortcut(QKeySequence("Ctrl+Z"), self, activated=self._shortcut_undo)
         QShortcut(QKeySequence("Ctrl+Y"), self, activated=self._shortcut_redo)
         QShortcut(QKeySequence("Ctrl+="), self, activated=lambda: self.step_zoom(1.15))
         QShortcut(QKeySequence("Ctrl+-"), self, activated=lambda: self.step_zoom(0.85))
+        QShortcut(QKeySequence("Ctrl+0"), self, activated=lambda: self.set_zoom_mode("Fit Width"))
+        QShortcut(QKeySequence("Ctrl+1"), self, activated=lambda: self.set_zoom_mode("100%"))
 
     def _shortcut_undo(self) -> None:
         fw = QApplication.focusWidget()
@@ -554,11 +569,46 @@ class MainWindow(QMainWindow):
         self.ribbon.update_page_info(0, engine.page_count)
         self.ribbon.set_zoom_label(tab.zoom_mode)
         self._update_search_label(tab)
+        if file_path:
+            self._record_recent_file(file_path)
         self.status_bar.showMessage(f"Opened {name} ({engine.page_count} pages)")
         return tab
 
+    def new_blank_pdf(self) -> DocumentTab | None:
+        return self.open_pdf_bytes(create_blank_pdf_bytes(), "Untitled.pdf")
+
     def load_sample_pdf(self) -> DocumentTab | None:
         return self.open_pdf_bytes(create_sample_pdf_bytes(), "Sample_Document.pdf")
+
+    def _load_recent_files(self) -> list[str]:
+        raw = QSettings("Personal", "Personal PDF Suite").value("recentFiles", [])
+        if isinstance(raw, str):
+            raw = [raw] if raw else []
+        return [p for p in (raw or []) if isinstance(p, str) and os.path.isfile(p)][:8]
+
+    def _record_recent_file(self, path: str) -> None:
+        norm = os.path.abspath(path)
+        if not os.path.isfile(norm):
+            return
+        cur = [p for p in self._load_recent_files() if os.path.normcase(p) != os.path.normcase(norm)]
+        updated = [norm] + cur[:7]
+        QSettings("Personal", "Personal PDF Suite").setValue("recentFiles", updated)
+        self.ribbon.update_recent_files(updated)
+
+    def _set_tab_dirty(self, tab: DocumentTab, dirty: bool = True) -> None:
+        tab.dirty = dirty
+        title = f"* {tab.engine.name}" if dirty else tab.engine.name
+        for i in range(self.tabs.count()):
+            if self.tabs.tabData(i) is tab:
+                self.tabs.setTabText(i, title)
+                break
+
+    def _on_bookmark_added(self, title: str, page_idx: int) -> None:
+        tab = self.current_tab()
+        if tab is not None:
+            tab.base_modified = True
+            self._set_tab_dirty(tab, True)
+        self.status_bar.showMessage(f"Bookmark added: {title} (Page {page_idx + 1})")
 
     def _callbacks_for(self, tab: DocumentTab) -> dict:
         return {
@@ -772,6 +822,7 @@ class MainWindow(QMainWindow):
         tab.redo_stack.clear()
         tab.engine.set_in_place_edit(op)
         self._rebuild_tab_pages(tab)
+        self._set_tab_dirty(tab, True)
         if tab is self.current_tab():
             self.sidebar.refresh_annotations()
             self.sidebar.refresh_thumbnails()
@@ -780,11 +831,13 @@ class MainWindow(QMainWindow):
     def _on_annot_added(self, tab: DocumentTab, page_idx: int, kind: str, item: object) -> None:
         tab.undo_stack.append(_UndoEntry(kind=kind, page_idx=page_idx, payload=item))
         tab.redo_stack.clear()
+        self._set_tab_dirty(tab, True)
         self.sidebar.refresh_annotations()
 
     def _on_annot_removed(self, tab: DocumentTab, page_idx: int, kind: str, item: object) -> None:
         tab.undo_stack.append(_UndoEntry(kind=kind, page_idx=page_idx, payload=item, action="remove"))
         tab.redo_stack.clear()
+        self._set_tab_dirty(tab, True)
         self.sidebar.refresh_annotations()
 
     def undo(self) -> None:
@@ -820,6 +873,7 @@ class MainWindow(QMainWindow):
                         tab.page_widgets[entry.page_idx].selected_item = None
             if entry.page_idx < len(tab.page_widgets):
                 tab.page_widgets[entry.page_idx].update()
+        self._set_tab_dirty(tab, tab.base_modified or bool(tab.undo_stack))
         self.sidebar.refresh_annotations()
         self.status_bar.showMessage("Undone")
 
@@ -852,6 +906,7 @@ class MainWindow(QMainWindow):
                     lst.append(entry.payload)
             if entry.page_idx < len(tab.page_widgets):
                 tab.page_widgets[entry.page_idx].update()
+        self._set_tab_dirty(tab, tab.base_modified or bool(tab.undo_stack))
         self.sidebar.refresh_annotations()
         self.status_bar.showMessage("Redone")
 
@@ -1149,7 +1204,7 @@ class MainWindow(QMainWindow):
         tab.page_widgets[tab.current_page].update()
         return True
 
-    def _replace_tab_document(self, tab: DocumentTab, new_bytes: bytes) -> None:
+    def _replace_tab_document(self, tab: DocumentTab, new_bytes: bytes, mark_dirty: bool = True) -> None:
         tab.commit_any_active_editor()
         if tab is self.current_tab():
             self._hide_floating_bar()
@@ -1158,6 +1213,8 @@ class MainWindow(QMainWindow):
         tab.engine = PDFDocumentEngine(new_bytes, name=old_name, file_path=old_path)
         tab.undo_stack.clear()
         tab.redo_stack.clear()
+        tab.base_modified = mark_dirty
+        self._set_tab_dirty(tab, mark_dirty)
         self._rebuild_tab_pages(tab)
         if tab is self.current_tab():
             self.sidebar.set_engine(tab.engine, min(tab.current_page, max(0, tab.engine.page_count - 1)))
@@ -1191,7 +1248,7 @@ class MainWindow(QMainWindow):
             return
         out_bytes = tab.engine.build_final_pdf_bytes()
         write_bytes_atomic(tab.engine.file_path, out_bytes)
-        self._replace_tab_document(tab, out_bytes)
+        self._replace_tab_document(tab, out_bytes, mark_dirty=False)
         self.status_bar.showMessage(f"Saved {tab.engine.file_path}")
 
     def save_as_current_pdf(self) -> None:
@@ -1209,8 +1266,8 @@ class MainWindow(QMainWindow):
         write_bytes_atomic(path, out_bytes)
         tab.engine.file_path = path
         tab.engine.name = os.path.basename(path)
-        self.tabs.setTabText(self.tabs.currentIndex(), tab.engine.name)
-        self._replace_tab_document(tab, out_bytes)
+        self._replace_tab_document(tab, out_bytes, mark_dirty=False)
+        self._record_recent_file(path)
         self.status_bar.showMessage(f"Saved as {path}")
 
     def print_current_pdf(self) -> None:

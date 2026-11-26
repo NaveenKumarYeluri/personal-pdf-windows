@@ -205,6 +205,15 @@ def _split_plain_words(
     return fit, over
 
 
+def create_blank_pdf_bytes(width: float = 595.28, height: float = 841.89) -> bytes:
+    """Create a clean single-page blank PDF document (default A4 portrait)."""
+    doc = pymupdf.open()
+    doc.new_page(width=width, height=height)
+    data = doc.tobytes(deflate=True, garbage=3)
+    doc.close()
+    return data
+
+
 def create_sample_pdf_bytes() -> bytes:
     """Generate a crisp sample multi-page PDF for quick testing and welcome flow."""
     doc = pymupdf.open()

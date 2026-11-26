@@ -501,3 +501,72 @@ def test_lazy_thumbnails_and_selective_page_rerender(qtbot, monkeypatch):
 
     assert 0 in rendered_pages
     assert 1 not in rendered_pages
+
+
+def test_new_blank_recent_dirty_and_shortcuts(qtbot, tmp_path, monkeypatch):
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QFileDialog
+
+    settings_store: dict[str, object] = {}
+
+    class _FakeSettings:
+        def __init__(self, *a, **kw):
+            pass
+
+        def value(self, key, default=None):
+            return settings_store.get(key, default)
+
+        def setValue(self, key, val):
+            settings_store[key] = val
+
+    monkeypatch.setattr("app.ui.main_window.QSettings", _FakeSettings)
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+
+    # 1. Create a blank PDF, verify clean title, add text -> dirty '*' appears, undo -> cleared
+    tab = win.new_blank_pdf()
+    assert tab is not None
+    assert tab.engine.page_count == 1
+    assert win.tabs.tabText(0) == "Untitled.pdf"
+    assert not tab.dirty
+
+    win.ribbon.set_mode("edit")
+    win._set_active_tool("add_text")
+    pw0 = tab.page_widgets[0]
+    QTest.mouseClick(pw0, Qt.LeftButton, Qt.NoModifier, QPoint(int(80 * pw0.zoom), int(80 * pw0.zoom)))
+    pw0.active_editor.selectAll()
+    QTest.keyClicks(pw0.active_editor, "Blank Page Note")
+    win.floating_bar.btn_done.click()
+    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert tab.dirty is True
+    assert win.tabs.tabText(0) == "* Untitled.pdf"
+
+    win.undo()
+    assert tab.dirty is False
+    assert win.tabs.tabText(0) == "Untitled.pdf"
+    win.redo()
+    assert tab.dirty is True
+    assert win.tabs.tabText(0) == "* Untitled.pdf"
+
+    # 2. Save As clears '*' and updates Recent Files submenu
+    out_pdf = tmp_path / "blank_saved.pdf"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **kw: (str(out_pdf), "PDF Files (*.pdf)"))
+    win.save_as_current_pdf()
+    assert out_pdf.exists()
+    assert tab.dirty is False
+    assert win.tabs.tabText(0) == "blank_saved.pdf"
+    recent_texts = [a.text() for a in win.ribbon.recent_menu.actions()]
+    assert str(out_pdf.resolve()) in recent_texts
+
+    # 3. Zoom presets & close tab via shortcut helpers
+    win.set_zoom_mode("100%")
+    assert abs(tab.zoom - 1.0) < 0.01
+    win._close_tab(win.tabs.currentIndex())
+    assert win.tabs.count() == 0
+
+    # Re-open from Recent Files menu action
+    win.ribbon.recent_menu.actions()[0].trigger()
+    assert win.tabs.count() == 1
+    assert "Blank Page Note" in pymupdf.open(stream=win.current_tab().engine.build_final_pdf_bytes(), filetype="pdf")[0].get_text("text")
