@@ -293,11 +293,18 @@ class PDFDocumentEngine:
 
     def _open_base_check(self) -> None:
         doc = pymupdf.open(stream=self.base_pdf_bytes, filetype="pdf")
-        self.needs_password = bool(doc.needs_pass)
-        doc.close()
+        try:
+            if not doc.is_pdf:
+                raise ValueError("The selected file is not a valid PDF document.")
+            self.needs_password = bool(doc.needs_pass)
+        finally:
+            doc.close()
 
     def authenticate(self, password: str) -> bool:
         doc = pymupdf.open(stream=self.base_pdf_bytes, filetype="pdf")
+        if not doc.is_pdf:
+            doc.close()
+            return False
         if not doc.needs_pass:
             doc.close()
             self.needs_password = False

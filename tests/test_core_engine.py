@@ -118,3 +118,16 @@ def test_watermark_bates_metadata_and_encryption(tmp_path):
     assert out_file.exists() and out_file.read_bytes().startswith(b"%PDF")
     png = export_page_image(meta_bytes, 0, dpi=120, fmt="png")
     assert png.startswith(b"\x89PNG")
+
+
+def test_rejects_non_pdf_bytes():
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("[Content_Types].xml", "<Types/>")
+        zf.writestr("word/document.xml", "<w:document/>")
+
+    for bad_bytes in (b"not a pdf at all", buf.getvalue()):
+        with pytest.raises(Exception):
+            PDFDocumentEngine(bad_bytes, "fake.docx")
