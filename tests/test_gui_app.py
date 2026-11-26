@@ -570,3 +570,76 @@ def test_new_blank_recent_dirty_and_shortcuts(qtbot, tmp_path, monkeypatch):
     win.ribbon.recent_menu.actions()[0].trigger()
     assert win.tabs.count() == 1
     assert "Blank Page Note" in pymupdf.open(stream=win.current_tab().engine.build_final_pdf_bytes(), filetype="pdf")[0].get_text("text")
+
+
+def test_canvas_context_menu_and_sticky_note_hover(qtbot, monkeypatch):
+    from PySide6.QtWidgets import QToolTip
+    from app.core.models import StampItem, StickyNote
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+
+    tab = win.load_sample_pdf()
+    pw0 = tab.page_widgets[0]
+
+    # 1. Selection context menu -> Highlight Selection creates undoable markup
+    blk0 = tab.engine.extract_text_blocks(0)[0]
+    p0 = QPoint(int(blk0.rect[0] * pw0.zoom), int(blk0.rect[1] * pw0.zoom))
+    p1 = QPoint(int(blk0.rect[2] * pw0.zoom), int(blk0.rect[3] * pw0.zoom))
+    QTest.mousePress(pw0, Qt.LeftButton, Qt.NoModifier, p0)
+    QTest.mouseMove(pw0, p1)
+    QTest.mouseRelease(pw0, Qt.LeftButton, Qt.NoModifier, p1)
+    assert pw0.get_selected_text() != ""
+
+    menu_sel = pw0.build_context_menu(QPointF(p0))
+    act_hl = next(a for a in menu_sel.actions() if a.text() == "Highlight Selection")
+    act_hl.trigger()
+    assert len(tab.engine.markups.get(0, [])) == 1
+    win.undo()
+    assert len(tab.engine.markups.get(0, [])) == 0
+
+    # 2. Overlay context menu -> Rotate, Bring to Front, Lock, Delete
+    s1 = StampItem(page_idx=0, kind="stamp", rect=(80, 120, 220, 170), text="FIRST")
+    s2 = StampItem(page_idx=0, kind="stamp", rect=(80, 120, 220, 170), text="SECOND")
+    tab.engine.stamps[0] = [s1, s2]
+    center = QPointF(150 * pw0.zoom, 145 * pw0.zoom)
+    menu_ov = pw0.build_context_menu(center)
+    next(a for a in menu_ov.actions() if a.text() == "Rotate Overlay 90° CW").trigger()
+    assert s2.rotation == (360 - 8 + 90) % 360
+
+    act_lock = next(a for a in menu_ov.actions() if a.text() == "Lock Position")
+    act_lock.trigger()
+    assert s2.locked is True
+    menu_ov2 = pw0.build_context_menu(center)
+    assert not next(a for a in menu_ov2.actions() if a.text() == "Delete Overlay").isEnabled()
+    next(a for a in menu_ov2.actions() if a.text() == "Lock Position").trigger()
+    assert s2.locked is False
+    assert next(a for a in menu_ov2.actions() if a.text() == "Delete Overlay").isEnabled()
+    next(a for a in menu_ov2.actions() if a.text() == "Delete Overlay").trigger()
+    assert len(tab.engine.stamps[0]) == 1
+
+    # 3. Sticky note hover shows tooltip & context menu deletes note cleanly
+    from PySide6.QtGui import QMouseEvent
+
+    nt = StickyNote(page_idx=0, x=300.0, y=300.0, text="Review this figure")
+    tab.engine.sticky_notes[0] = [nt]
+    tips = []
+    monkeypatch.setattr(QToolTip, "showText", lambda pos, txt, w=None: tips.append(txt))
+    hover_pt = QPointF(300.0 * pw0.zoom, 300.0 * pw0.zoom)
+    ev = QMouseEvent(
+        QEvent.MouseMove,
+        hover_pt,
+        QPointF(pw0.mapToGlobal(hover_pt.toPoint())),
+        Qt.NoButton,
+        Qt.NoButton,
+        Qt.NoModifier,
+    )
+    QApplication.sendEvent(pw0, ev)
+    assert any("Review this figure" in t for t in tips)
+
+    menu_nt = pw0.build_context_menu(QPointF(300 * pw0.zoom, 300 * pw0.zoom))
+    next(a for a in menu_nt.actions() if a.text() == "Delete Sticky Note").trigger()
+    assert len(tab.engine.sticky_notes[0]) == 0
+    win.undo()
+    assert len(tab.engine.sticky_notes[0]) == 1

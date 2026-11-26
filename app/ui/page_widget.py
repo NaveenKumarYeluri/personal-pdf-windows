@@ -10,6 +10,7 @@ import shiboken6
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
+    QContextMenuEvent,
     QFont,
     QImage,
     QKeyEvent,
@@ -19,7 +20,7 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
 )
-from PySide6.QtWidgets import QInputDialog, QScrollArea, QWidget
+from PySide6.QtWidgets import QApplication, QInputDialog, QMenu, QScrollArea, QToolTip, QWidget
 
 from app.core.ligatures import heal_pdf_text
 from app.core.models import (
@@ -413,22 +414,7 @@ class PDFPageWidget(QWidget):
                 return
 
         if self.active_tool == "add_text":
-            new_id = f"new_{uuid.uuid4().hex[:8]}"
-            w_pt = min(240.0, max(120.0, self._page_w_pt - px - 24.0))
-            blk = TextBlock(
-                block_id=new_id,
-                page_idx=self.page_idx,
-                rect=(px, py, px + w_pt, py + 28.0),
-                plain_text="",
-                html=f'<div style="font-family:{self.tool_font};font-size:{self.tool_font_size}pt;color:{self.tool_color};"><p>Type text here</p></div>',
-                font_family=self.tool_font,
-                font_size=float(self.tool_font_size),
-                is_bold=False,
-                is_italic=False,
-                color_hex=self.tool_color,
-            )
-            ed = self.open_editor_for_block(blk, is_new=True)
-            ed.selectAll()
+            self._add_new_text_at(px, py)
             return
 
         if self.active_tool in ("pen", "highlighter"):
@@ -524,6 +510,12 @@ class PDFPageWidget(QWidget):
                 self.update()
             return
 
+        note = self._find_sticky_note_at(px, py)
+        if note is not None:
+            QToolTip.showText(event.globalPosition().toPoint(), f"{note.author}:\n{note.text}", self)
+        else:
+            QToolTip.hideText()
+
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
@@ -595,32 +587,159 @@ class PDFPageWidget(QWidget):
             self._sel_cur = None
             if self._selected_quads and self.active_tool in ("underline", "strikethrough", "highlight_sel"):
                 mtype = "highlight" if self.active_tool == "highlight_sel" else self.active_tool
-                mk = TextMarkup(
-                    page_idx=self.page_idx,
-                    markup_type=mtype,
-                    rects=list(self._selected_quads),
-                    color_hex=self.tool_color,
-                    opacity=0.35 if mtype == "highlight" else 1.0,
-                )
-                self.engine.markups.setdefault(self.page_idx, []).append(mk)
-                self.annotationAdded.emit(self.page_idx, "markup", mk)
-                self._selected_quads = []
-                self._selected_text = ""
+                self._create_markup_from_selection(mtype)
             self.update()
             return
 
         super().mouseReleaseEvent(event)
 
+    def _find_sticky_note_at(self, px: float, py: float) -> StickyNote | None:
+        for note in self.engine.sticky_notes.get(self.page_idx, []):
+            if abs(px - note.x) <= 14 and abs(py - note.y) <= 14:
+                return note
+        return None
+
+    def _create_markup_from_selection(self, mtype: str) -> None:
+        if not self._selected_quads:
+            return
+        color = "#eab308" if mtype == "highlight" and self.active_tool == "select" else self.tool_color
+        mk = TextMarkup(
+            page_idx=self.page_idx,
+            markup_type=mtype,
+            rects=list(self._selected_quads),
+            color_hex=color,
+            opacity=0.35 if mtype == "highlight" else 1.0,
+        )
+        self.engine.markups.setdefault(self.page_idx, []).append(mk)
+        self.annotationAdded.emit(self.page_idx, "markup", mk)
+        self._selected_quads = []
+        self._selected_text = ""
+        self.update()
+
+    def _add_new_text_at(self, px: float, py: float) -> None:
+        new_id = f"new_{uuid.uuid4().hex[:8]}"
+        w_pt = min(240.0, max(120.0, self._page_w_pt - px - 24.0))
+        blk = TextBlock(
+            block_id=new_id,
+            page_idx=self.page_idx,
+            rect=(px, py, px + w_pt, py + 28.0),
+            plain_text="",
+            html=f'<div style="font-family:{self.tool_font};font-size:{self.tool_font_size}pt;color:{self.tool_color};"><p>Type text here</p></div>',
+            font_family=self.tool_font,
+            font_size=float(self.tool_font_size),
+            is_bold=False,
+            is_italic=False,
+            color_hex=self.tool_color,
+        )
+        ed = self.open_editor_for_block(blk, is_new=True)
+        ed.selectAll()
+
+    def _store_for_overlay_item(self, item: object) -> tuple[str | None, list | None]:
+        for kind, store in [
+            ("stamp", self.engine.stamps),
+            ("textbox", self.engine.text_boxes),
+            ("whiteout", self.engine.whiteouts),
+            ("redact", self.engine.redactions),
+        ]:
+            lst = store.get(self.page_idx, [])
+            if item in lst:
+                return kind, lst
+        return None, None
+
+    def build_context_menu(self, pos: QPointF) -> QMenu:
+        px, py = self._to_pdf_pt(pos)
+        menu = QMenu(self)
+
+        if self._selected_quads and self._selected_text:
+            menu.addAction("Copy Selected Text", lambda: QApplication.clipboard().setText(heal_pdf_text(self._selected_text)))
+            menu.addAction("Highlight Selection", lambda: self._create_markup_from_selection("highlight"))
+            menu.addAction("Underline Selection", lambda: self._create_markup_from_selection("underline"))
+            menu.addAction("Strikethrough Selection", lambda: self._create_markup_from_selection("strikethrough"))
+            menu.addAction("Clear Selection", self.clear_text_selection)
+            menu.addSeparator()
+
+        hit, _ = self._hit_overlay_item(px, py)
+        if hit is not None:
+            self.selected_item = hit
+            self.update()
+            if isinstance(hit, StampItem):
+                def _rot_stamp(_chk: bool = False, item: StampItem = hit) -> None:
+                    item.rotation = (item.rotation + 90.0) % 360.0
+                    self.update()
+                menu.addAction("Rotate Overlay 90° CW", _rot_stamp)
+
+            def _bring_to_front(_chk: bool = False, item: object = hit) -> None:
+                _, lst = self._store_for_overlay_item(item)
+                if lst is not None and item in lst:
+                    lst.remove(item)
+                    lst.append(item)
+                    self.update()
+
+            menu.addAction("Bring to Front", _bring_to_front)
+            act_del = menu.addAction(
+                "Delete Overlay",
+                lambda _chk=False, item=hit: self._remove_overlay_item(item),
+            )
+            act_del.setEnabled(not getattr(hit, "locked", False))
+
+            if hasattr(hit, "locked"):
+                act_lock = menu.addAction("Lock Position")
+                act_lock.setCheckable(True)
+                act_lock.setChecked(bool(hit.locked))
+
+                def _toggle_lock(chk: bool, item: object = hit, del_act=act_del) -> None:
+                    item.locked = bool(chk)
+                    del_act.setEnabled(not bool(chk))
+
+                act_lock.toggled.connect(_toggle_lock)
+            menu.addSeparator()
+
+        note = self._find_sticky_note_at(px, py)
+        if note is not None:
+            def _edit_note(nt: StickyNote = note) -> None:
+                txt, ok = QInputDialog.getMultiLineText(self, "Edit Sticky Note", "Comment:", nt.text)
+                if ok and txt.strip():
+                    nt.text = txt.strip()
+                    self.update()
+
+            def _del_note(nt: StickyNote = note) -> None:
+                notes = self.engine.sticky_notes.get(self.page_idx, [])
+                if nt in notes:
+                    notes.remove(nt)
+                    self.annotationRemoved.emit(self.page_idx, "note", nt)
+                    self.update()
+
+            menu.addAction("Edit Sticky Note...", _edit_note)
+            menu.addAction("Delete Sticky Note", _del_note)
+            menu.addSeparator()
+
+        def _add_note() -> None:
+            txt, ok = QInputDialog.getMultiLineText(self, "Sticky Note", "Comment text:")
+            if ok and txt.strip():
+                nt = StickyNote(page_idx=self.page_idx, x=px, y=py, text=txt.strip())
+                self.engine.sticky_notes.setdefault(self.page_idx, []).append(nt)
+                self.annotationAdded.emit(self.page_idx, "note", nt)
+                self.update()
+
+        menu.addAction("Add Sticky Note Here...", _add_note)
+        if (self.rotation % 360) == 0:
+            menu.addAction("Add Text Here", lambda: self._add_new_text_at(px, py))
+        return menu
+
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:
+        menu = self.build_context_menu(QPointF(event.pos()))
+        menu.exec(event.globalPos())
+
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         px, py = self._to_pdf_pt(event.position())
         # Check sticky notes
-        for note in self.engine.sticky_notes.get(self.page_idx, []):
-            if abs(px - note.x) <= 14 and abs(py - note.y) <= 14:
-                txt, ok = QInputDialog.getMultiLineText(self, "Edit Sticky Note", "Comment:", note.text)
-                if ok:
-                    note.text = txt.strip() or note.text
-                    self.update()
-                return
+        note = self._find_sticky_note_at(px, py)
+        if note is not None:
+            txt, ok = QInputDialog.getMultiLineText(self, "Edit Sticky Note", "Comment:", note.text)
+            if ok:
+                note.text = txt.strip() or note.text
+                self.update()
+            return
         # Check removable overlays
         hit, _ = self._hit_overlay_item(px, py)
         if hit is not None and not getattr(hit, "locked", False):
@@ -636,20 +755,13 @@ class PDFPageWidget(QWidget):
         super().keyPressEvent(event)
 
     def _remove_overlay_item(self, item: object) -> None:
-        for kind, store in [
-            ("stamp", self.engine.stamps),
-            ("textbox", self.engine.text_boxes),
-            ("whiteout", self.engine.whiteouts),
-            ("redact", self.engine.redactions),
-        ]:
-            lst = store.get(self.page_idx, [])
-            if item in lst:
-                lst.remove(item)
-                if self.selected_item is item:
-                    self.selected_item = None
-                self.annotationRemoved.emit(self.page_idx, kind, item)
-                self.update()
-                return
+        kind, lst = self._store_for_overlay_item(item)
+        if kind is not None and lst is not None:
+            lst.remove(item)
+            if self.selected_item is item:
+                self.selected_item = None
+            self.annotationRemoved.emit(self.page_idx, kind, item)
+            self.update()
 
     def _erase_at(self, px: float, py: float) -> None:
         tol = 10.0
