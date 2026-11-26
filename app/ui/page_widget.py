@@ -222,11 +222,12 @@ class PDFPageWidget(QWidget):
             base_block_id=blk.base_block_id,
             base_rect=blk.base_rect,
         )
+        effective_is_new = is_new or getattr(blk, "is_new_block", False) or blk.block_id.startswith("new_")
         editor = InPlaceTextEditor(
             block=display_blk,
             zoom=self.zoom,
             accent_color=self.accent_color,
-            is_new_block=is_new,
+            is_new_block=effective_is_new,
             reflow_enabled=True,
             parent=self,
         )
@@ -270,13 +271,18 @@ class PDFPageWidget(QWidget):
         ed.deleteLater()
         self.inPlaceEditorClosed.emit(self, ed)
 
-        # Skip committing unchanged blocks
-        if not is_new and new_text == blk.plain_text.strip() and clean_html == blk.html:
-            return None
-
         target_page_idx = blk.base_page_idx if blk.base_page_idx >= 0 else self.page_idx
         target_block_id = blk.base_block_id or blk.block_id
         target_base_rect = blk.base_rect or blk.rect
+        already_committed = target_block_id in self.engine.in_place_edits.get(target_page_idx, {})
+
+        # Skip empty newly created blocks that were never committed
+        if is_new and not new_text and not already_committed:
+            return None
+
+        # Skip committing unchanged blocks (including already-committed added blocks)
+        if (not is_new or already_committed) and new_text == blk.plain_text.strip() and clean_html == blk.html:
+            return None
 
         op = TextEditOp(
             edit_id=uuid.uuid4().hex[:10],

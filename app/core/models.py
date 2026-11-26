@@ -52,6 +52,7 @@ class TextBlock:
     base_rect: tuple[float, float, float, float] | None = None
     full_edit_html: str | None = None
     full_edit_text: str | None = None
+    is_new_block: bool = False
 
 
 @dataclass

@@ -196,3 +196,77 @@ def test_word_flow_story_and_true_redaction():
     assert "Vector In-Place Text Editing" not in d_red[0].get_text("text")
     assert "APPROVED" in d_red[0].get_text("text")
     d_red.close()
+
+
+def test_add_text_and_reediting_new_block_preserves_and_overflows():
+    sample = create_sample_pdf_bytes()
+    eng = PDFDocumentEngine(sample, "sample.pdf")
+
+    op1 = TextEditOp(
+        edit_id="new1",
+        page_idx=0,
+        orig_rect=(50.0, 500.0, 290.0, 528.0),
+        target_rect=(50.0, 500.0, 290.0, 528.0),
+        original_text="",
+        original_html="",
+        new_text="First Added Text",
+        new_html='<div style="font-family:Calibri,sans-serif;font-size:12pt;color:#000000;"><p>First Added Text</p></div>',
+        font_family="Calibri",
+        font_size=12.0,
+        color_hex="#000000",
+        is_new_block=True,
+        block_id="new_blk001",
+    )
+    eng.set_in_place_edit(op1)
+    preview_blocks = eng.extract_text_blocks(0)
+    added_blk = next(b for b in preview_blocks if b.base_block_id == "new_blk001")
+    assert added_blk.is_new_block is True
+    assert "First Added Text" in added_blk.plain_text
+
+    # Re-editing the newly added block (even with is_new_block=False) must update rather than drop it
+    op2 = TextEditOp(
+        edit_id="new2",
+        page_idx=added_blk.base_page_idx,
+        orig_rect=added_blk.base_rect,
+        target_rect=added_blk.base_rect,
+        original_text=added_blk.plain_text,
+        original_html=added_blk.html,
+        new_text="Updated Added Text",
+        new_html='<div style="font-family:Calibri,sans-serif;font-size:12pt;color:#000000;"><p>Updated Added Text</p></div>',
+        font_family="Calibri",
+        font_size=12.0,
+        color_hex="#000000",
+        is_new_block=False,
+        block_id=added_blk.base_block_id,
+    )
+    eng.set_in_place_edit(op2)
+    saved = eng.build_final_pdf_bytes()
+    doc = pymupdf.open(stream=saved, filetype="pdf")
+    p0_txt = doc[0].get_text("text")
+    assert "Updated Added Text" in p0_txt
+    assert "First Added Text" not in p0_txt
+    doc.close()
+
+    # Added text near bottom margin with many lines must overflow cleanly onto next page
+    long_paras = "".join(f"<p>Overflow added line {i}: testing bottom margin flow.</p>" for i in range(1, 8))
+    op_bottom = TextEditOp(
+        edit_id="new_bot",
+        page_idx=0,
+        orig_rect=(50.0, 760.0, 340.0, 788.0),
+        target_rect=(50.0, 760.0, 340.0, 788.0),
+        original_text="",
+        original_html="",
+        new_text="Overflow added line",
+        new_html=f'<div style="font-family:Calibri,sans-serif;font-size:12pt;color:#000000;">{long_paras}</div>',
+        font_family="Calibri",
+        font_size=12.0,
+        color_hex="#000000",
+        is_new_block=True,
+        block_id="new_bot001",
+    )
+    eng2 = PDFDocumentEngine(sample, "sample.pdf")
+    eng2.set_in_place_edit(op_bottom)
+    doc2 = pymupdf.open(stream=eng2.build_final_pdf_bytes(), filetype="pdf")
+    assert "Overflow added line 1" in doc2[0].get_text("text")
+    assert "Overflow added line 7" in doc2[1].get_text("text")
+    doc2.close()

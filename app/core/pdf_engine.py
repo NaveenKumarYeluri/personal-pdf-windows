@@ -258,6 +258,7 @@ class _PlacedFlowItem:
     base_rect: tuple[float, float, float, float] | None = None
     full_edit_html: str | None = None
     full_edit_text: str | None = None
+    is_new_block: bool = False
 
 
 class PDFDocumentEngine:
@@ -632,6 +633,9 @@ class PDFDocumentEngine:
         return None
 
     def set_in_place_edit(self, edit: TextEditOp) -> None:
+        prev = self.in_place_edits.get(edit.page_idx, {}).get(edit.block_id)
+        if not edit.is_new_block and ((prev is not None and prev.is_new_block) or edit.block_id.startswith("new_")):
+            edit.is_new_block = True
         self.in_place_edits.setdefault(edit.page_idx, {})[edit.block_id] = edit
         self.invalidate_cache()
 
@@ -730,6 +734,7 @@ class PDFDocumentEngine:
                                     base_rect=item.base_rect,
                                     full_edit_html=item.full_edit_html or item.html,
                                     full_edit_text=item.full_edit_text or item.plain_text,
+                                    is_new_block=item.is_new_block,
                                 )
                             )
                             cursor_y += h + PARA_GAP
@@ -765,6 +770,7 @@ class PDFDocumentEngine:
                                         base_rect=item.base_rect,
                                         full_edit_html=item.full_edit_html or item.html,
                                         full_edit_text=item.full_edit_text or item.plain_text,
+                                        is_new_block=item.is_new_block,
                                     )
                                 )
                             if over_h:
@@ -786,6 +792,7 @@ class PDFDocumentEngine:
                                         base_rect=item.base_rect,
                                         full_edit_html=item.full_edit_html or item.html,
                                         full_edit_text=item.full_edit_text or item.plain_text,
+                                        is_new_block=item.is_new_block,
                                     )
                                 )
                             next_incoming.extend(incoming_queue[idx_in + 1 :])
@@ -840,7 +847,74 @@ class PDFDocumentEngine:
                 native_items.append((op.target_rect[1], "new_op", op))
             native_items.sort(key=lambda item: item[0])
 
+            def _place_or_split(flow_item: _PlacedFlowItem, w: float) -> None:
+                nonlocal overflow_triggered
+                if overflow_triggered or flow_item.y0 >= safe_bottom - 14.0:
+                    overflow_triggered = True
+                    next_incoming.append(flow_item)
+                elif flow_item.y1 <= safe_bottom:
+                    placed_items.append(flow_item)
+                else:
+                    avail = safe_bottom - flow_item.y0
+                    fit_h, over_h = split_html_to_fit(
+                        flow_item.html,
+                        flow_item.plain_text,
+                        w,
+                        avail,
+                        flow_item.font_family,
+                        flow_item.font_size,
+                        flow_item.color_hex,
+                        flow_item.line_height_ratio,
+                    )
+                    if fit_h:
+                        fh = measure_html_height(fit_h, w)
+                        placed_items.append(
+                            _PlacedFlowItem(
+                                kind="html",
+                                x0=flow_item.x0,
+                                y0=flow_item.y0,
+                                x1=flow_item.x1,
+                                y1=flow_item.y0 + fh,
+                                html=fit_h,
+                                plain_text=flow_item.plain_text,
+                                font_family=flow_item.font_family,
+                                font_size=flow_item.font_size,
+                                color_hex=flow_item.color_hex,
+                                line_height_ratio=flow_item.line_height_ratio,
+                                base_page_idx=flow_item.base_page_idx,
+                                base_block_id=flow_item.base_block_id,
+                                base_rect=flow_item.base_rect,
+                                full_edit_html=flow_item.full_edit_html,
+                                full_edit_text=flow_item.full_edit_text,
+                                is_new_block=flow_item.is_new_block,
+                            )
+                        )
+                    if over_h:
+                        overflow_triggered = True
+                        next_incoming.append(
+                            _PlacedFlowItem(
+                                kind="html",
+                                x0=flow_item.x0,
+                                y0=0.0,
+                                x1=flow_item.x1,
+                                y1=0.0,
+                                html=over_h,
+                                plain_text=flow_item.plain_text,
+                                font_family=flow_item.font_family,
+                                font_size=flow_item.font_size,
+                                color_hex=flow_item.color_hex,
+                                line_height_ratio=flow_item.line_height_ratio,
+                                base_page_idx=flow_item.base_page_idx,
+                                base_block_id=flow_item.base_block_id,
+                                base_rect=flow_item.base_rect,
+                                full_edit_html=flow_item.full_edit_html,
+                                full_edit_text=flow_item.full_edit_text,
+                                is_new_block=flow_item.is_new_block,
+                            )
+                        )
+
             overflow_triggered = bool(next_incoming)
+            consumed_edit_ids: set[str] = set()
             for _, kind, payload in native_items:
                 if kind == "block":
                     blk: TextBlock = payload
@@ -854,6 +928,8 @@ class PDFDocumentEngine:
                             ):
                                 op = cand_op
                                 break
+                    if op is not None:
+                        consumed_edit_ids.add(op.block_id)
 
                     shift = _cumulative_shift(blk.rect[0], blk.rect[2], blk.rect[1])
                     is_edited = op is not None
@@ -892,68 +968,7 @@ class PDFDocumentEngine:
                         full_edit_html=h_html,
                         full_edit_text=h_plain,
                     )
-
-                    if overflow_triggered or flow_item.y0 >= safe_bottom - 14.0:
-                        overflow_triggered = True
-                        next_incoming.append(flow_item)
-                    elif flow_item.y1 <= safe_bottom:
-                        placed_items.append(flow_item)
-                    else:
-                        avail = safe_bottom - flow_item.y0
-                        fit_h, over_h = split_html_to_fit(
-                            flow_item.html,
-                            flow_item.plain_text,
-                            w,
-                            avail,
-                            h_font,
-                            h_size,
-                            h_color,
-                            h_ratio,
-                        )
-                        if fit_h:
-                            fh = measure_html_height(fit_h, w)
-                            placed_items.append(
-                                _PlacedFlowItem(
-                                    kind="html",
-                                    x0=tx0,
-                                    y0=flow_item.y0,
-                                    x1=tx1,
-                                    y1=flow_item.y0 + fh,
-                                    html=fit_h,
-                                    plain_text=h_plain,
-                                    font_family=h_font,
-                                    font_size=h_size,
-                                    color_hex=h_color,
-                                    line_height_ratio=h_ratio,
-                                    base_page_idx=p_idx,
-                                    base_block_id=blk.block_id,
-                                    base_rect=blk.rect,
-                                    full_edit_html=h_html,
-                                    full_edit_text=h_plain,
-                                )
-                            )
-                        if over_h:
-                            overflow_triggered = True
-                            next_incoming.append(
-                                _PlacedFlowItem(
-                                    kind="html",
-                                    x0=tx0,
-                                    y0=0.0,
-                                    x1=tx1,
-                                    y1=0.0,
-                                    html=over_h,
-                                    plain_text=h_plain,
-                                    font_family=h_font,
-                                    font_size=h_size,
-                                    color_hex=h_color,
-                                    line_height_ratio=h_ratio,
-                                    base_page_idx=p_idx,
-                                    base_block_id=blk.block_id,
-                                    base_rect=blk.rect,
-                                    full_edit_html=h_html,
-                                    full_edit_text=h_plain,
-                                )
-                            )
+                    _place_or_split(flow_item, w)
 
                 elif kind == "image":
                     img_info = payload
@@ -991,10 +1006,42 @@ class PDFDocumentEngine:
 
                 elif kind == "new_op":
                     op: TextEditOp = payload
+                    shift = _cumulative_shift(op.target_rect[0], op.target_rect[2], op.target_rect[1])
                     w = max(40.0, op.target_rect[2] - op.target_rect[0])
                     h = measure_html_height(op.new_html, w)
-                    ty0 = op.target_rect[1] + incoming_shift
-                    placed_items.append(
+                    ty0 = op.target_rect[1] + shift
+                    flow_item = _PlacedFlowItem(
+                        kind="html",
+                        x0=op.target_rect[0],
+                        y0=ty0,
+                        x1=op.target_rect[2],
+                        y1=ty0 + h,
+                        html=op.new_html,
+                        plain_text=op.new_text,
+                        font_family=op.font_family,
+                        font_size=op.font_size,
+                        color_hex=op.color_hex,
+                        line_height_ratio=op.line_height_ratio,
+                        base_page_idx=op.page_idx,
+                        base_block_id=op.block_id,
+                        base_rect=op.orig_rect,
+                        full_edit_html=op.new_html,
+                        full_edit_text=op.new_text,
+                        is_new_block=True,
+                    )
+                    _place_or_split(flow_item, w)
+
+            # Render any unmatched edits (and redact any edited blocks that didn't match an extracted dict block directly)
+            for op in matched_edits.values():
+                r = pymupdf.Rect(op.orig_rect)
+                if not any(abs(r.y0 - rr.y0) < 2 and abs(r.x0 - rr.x0) < 2 for rr in redact_text_rects):
+                    redact_text_rects.append(r)
+                if op.block_id not in consumed_edit_ids and op.new_text.strip():
+                    w = max(40.0, op.target_rect[2] - op.target_rect[0])
+                    h = measure_html_height(op.new_html, w)
+                    shift = _cumulative_shift(op.target_rect[0], op.target_rect[2], op.target_rect[1])
+                    ty0 = op.target_rect[1] + shift
+                    _place_or_split(
                         _PlacedFlowItem(
                             kind="html",
                             x0=op.target_rect[0],
@@ -1012,14 +1059,10 @@ class PDFDocumentEngine:
                             base_rect=op.orig_rect,
                             full_edit_html=op.new_html,
                             full_edit_text=op.new_text,
-                        )
+                            is_new_block=op.is_new_block,
+                        ),
+                        w,
                     )
-
-            # Also redact any edited blocks that didn't match an extracted dict block directly
-            for op in matched_edits.values():
-                r = pymupdf.Rect(op.orig_rect)
-                if not any(abs(r.y0 - rr.y0) < 2 and abs(r.x0 - rr.x0) < 2 for rr in redact_text_rects):
-                    redact_text_rects.append(r)
 
             # 1. Remove moved images from old positions first
             if moved_image_payloads:
@@ -1073,6 +1116,7 @@ class PDFDocumentEngine:
                                 base_rect=item.base_rect or (item.x0, item.y0, item.x1, item.y1),
                                 full_edit_html=item.full_edit_html,
                                 full_edit_text=item.full_edit_text,
+                                is_new_block=item.is_new_block,
                             )
                         )
             self._preview_flow_blocks[p_idx] = preview_list

@@ -87,7 +87,7 @@ class InPlaceTextEditor(QTextEdit):
 
         def _scale_pt(m: re.Match[str]) -> str:
             val = float(m.group(1))
-            return f"font-size:{max(6.0, val * zoom):.1f}pt"
+            return f"font-size:{max(2.0, val * zoom):.1f}pt"
 
         return re.sub(r"font-size\s*:\s*(\d+(?:\.\d+)?)pt", _scale_pt, html)
 
@@ -133,6 +133,10 @@ class InPlaceTextEditor(QTextEdit):
             self.revertRequested.emit(self)
             return
         if event.modifiers() & Qt.ControlModifier:
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                event.accept()
+                self.commitRequested.emit(self)
+                return
             if event.key() == Qt.Key_A:
                 event.accept()
                 self.selectAll()
@@ -168,7 +172,7 @@ class InPlaceTextEditor(QTextEdit):
     def set_font_size_pt(self, size_pt: int) -> None:
         cur = self._target_cursor()
         fmt = QTextCharFormat()
-        fmt.setFontPointSize(max(6.0, float(size_pt) * self.zoom))
+        fmt.setFontPointSize(max(2.0, float(size_pt) * self.zoom))
         cur.mergeCharFormat(fmt)
         self.pdf_block.font_size = float(size_pt)
         self._on_contents_changed()
