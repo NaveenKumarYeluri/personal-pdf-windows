@@ -376,3 +376,27 @@ def test_context_bar_replaces_buttons_cleanly_on_mode_switch(qtbot):
     win.set_mode("view")
     assert win.ribbon.context_bar.findChildren(QPushButton) == []
     assert not win.ribbon.context_bar.isVisible()
+
+
+def test_stamp_pixmap_cached_across_repaints(qtbot):
+    import io
+    from PIL import Image
+    from app.core.models import StampItem
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+    tab = win.load_sample_pdf()
+    pw0 = tab.page_widgets[0]
+
+    buf = io.BytesIO()
+    Image.new("RGBA", (600, 300), (220, 38, 38, 255)).save(buf, format="PNG")
+    stp = StampItem(page_idx=0, kind="image", rect=(40, 40, 200, 120), opacity=1.0, rotation=0.0, image_bytes=buf.getvalue())
+    tab.engine.stamps.setdefault(0, []).append(stp)
+
+    pw0.grab()
+    key = (stp.item_id, len(stp.image_bytes))
+    assert key in pw0._stamp_pixmap_cache
+    first_cache_key = pw0._stamp_pixmap_cache[key].cacheKey()
+    pw0.grab()
+    assert pw0._stamp_pixmap_cache[key].cacheKey() == first_cache_key

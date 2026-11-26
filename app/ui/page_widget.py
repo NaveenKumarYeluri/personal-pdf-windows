@@ -108,6 +108,7 @@ class PDFPageWidget(QWidget):
         self._drag_orig_rect: tuple[float, float, float, float] = (0, 0, 0, 0)
         self._panning: bool = False
         self._pan_last_global: QPointF | None = None
+        self._stamp_pixmap_cache: dict[tuple[str, int], QPixmap] = {}
 
         self.active_editor: InPlaceTextEditor | None = None
         self.refresh_render()
@@ -787,9 +788,9 @@ class PDFPageWidget(QWidget):
             painter.rotate(stp.rotation)
             local_rect = QRectF(-wr.width() / 2.0, -wr.height() / 2.0, wr.width(), wr.height())
             if stp.kind == "image" and stp.image_bytes:
-                img = QImage.fromData(stp.image_bytes)
-                if not img.isNull():
-                    painter.drawImage(local_rect, img)
+                pm = self._get_stamp_pixmap(stp)
+                if pm is not None:
+                    painter.drawPixmap(local_rect, pm, QRectF(pm.rect()))
             elif stp.kind == "stamp":
                 pen = QPen(_qcolor(stp.color_hex), 2.5)
                 painter.setPen(pen)
@@ -817,6 +818,20 @@ class PDFPageWidget(QWidget):
             painter.fillRect(grip, QColor("#2563eb"))
 
         painter.end()
+
+    def _get_stamp_pixmap(self, stp: StampItem) -> QPixmap | None:
+        if not stp.image_bytes:
+            return None
+        key = (stp.item_id, len(stp.image_bytes))
+        pm = self._stamp_pixmap_cache.get(key)
+        if pm is not None:
+            return pm if not pm.isNull() else None
+        pm = QPixmap()
+        pm.loadFromData(stp.image_bytes)
+        if len(self._stamp_pixmap_cache) >= 32:
+            self._stamp_pixmap_cache.clear()
+        self._stamp_pixmap_cache[key] = pm
+        return pm if not pm.isNull() else None
 
     def _paint_ink(
         self,
