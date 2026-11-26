@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+import weakref
 from dataclasses import dataclass
 
 import pymupdf
+import shiboken6
 from PySide6.QtCore import QPoint, QSize, Qt
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QImage, QKeySequence, QPainter, QShortcut
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
@@ -122,15 +124,32 @@ class DocumentTab(QScrollArea):
         return self.zoom
 
     def rebuild_pages(self, tool_state: dict, callbacks: dict) -> None:
-        for pw in self.page_widgets:
-            pw.setParent(None)
-            pw.deleteLater()
-        self.page_widgets.clear()
-
         if self.zoom_mode in ("Fit Width", "Fit Page"):
             self.zoom = self.calculate_fit_zoom()
 
-        for pno in range(self.engine.page_count):
+        target_count = self.engine.page_count
+
+        while len(self.page_widgets) > target_count:
+            pw = self.page_widgets.pop()
+            if shiboken6.isValid(pw):
+                if pw.active_editor is not None:
+                    pw.cancel_active_editor()
+                pw.setParent(None)
+                pw.deleteLater()
+
+        for pno, pw in enumerate(self.page_widgets):
+            if pw.active_editor is not None:
+                pw.cancel_active_editor()
+            pw.engine = self.engine
+            pw.page_idx = pno
+            pw.accent_color = self.accent_color
+            pw.selected_item = None
+            pw._hover_block = None
+            pw.clear_text_selection()
+            pw.set_tool_state(**tool_state)
+            pw.set_view_params(self.zoom, self.rotation)
+
+        for pno in range(len(self.page_widgets), target_count):
             pw = PDFPageWidget(
                 engine=self.engine,
                 page_idx=pno,
@@ -141,6 +160,7 @@ class DocumentTab(QScrollArea):
             )
             pw.set_tool_state(**tool_state)
             pw.inPlaceEditorOpened.connect(callbacks["editor_opened"])
+            pw.inPlaceEditorClosed.connect(callbacks["editor_closed"])
             pw.inPlaceEditCommitted.connect(callbacks["edit_committed"])
             pw.annotationAdded.connect(callbacks["annot_added"])
             pw.annotationRemoved.connect(callbacks["annot_removed"])
@@ -189,8 +209,8 @@ class DocumentTab(QScrollArea):
             self._programmatic_scroll = False
 
     def commit_any_active_editor(self) -> None:
-        for pw in self.page_widgets:
-            if pw.active_editor is not None:
+        for pw in list(self.page_widgets):
+            if shiboken6.isValid(pw) and pw.active_editor is not None:
                 pw.commit_active_editor()
 
     def wheelEvent(self, event) -> None:
@@ -293,17 +313,17 @@ class MainWindow(QMainWindow):
         root.addLayout(body, stretch=1)
 
         self.floating_bar = FloatingFormatBar(self)
-        self.floating_bar.fontChanged.connect(lambda f: self._active_editor and self._active_editor.set_font_family(f))
-        self.floating_bar.sizeChanged.connect(lambda s: self._active_editor and self._active_editor.set_font_size_pt(s))
-        self.floating_bar.boldToggled.connect(lambda b: self._active_editor and self._active_editor.toggle_bold(b))
-        self.floating_bar.italicToggled.connect(lambda i: self._active_editor and self._active_editor.toggle_italic(i))
-        self.floating_bar.underlineToggled.connect(lambda u: self._active_editor and self._active_editor.toggle_underline(u))
-        self.floating_bar.strikeToggled.connect(lambda s: self._active_editor and self._active_editor.toggle_strike(s))
-        self.floating_bar.alignChanged.connect(lambda a: self._active_editor and self._active_editor.set_alignment(a))
-        self.floating_bar.colorChanged.connect(lambda c: self._active_editor and self._active_editor.set_text_color(c))
+        self.floating_bar.fontChanged.connect(lambda f: self._apply_to_active_editor(lambda ed: ed.set_font_family(f)))
+        self.floating_bar.sizeChanged.connect(lambda s: self._apply_to_active_editor(lambda ed: ed.set_font_size_pt(s)))
+        self.floating_bar.boldToggled.connect(lambda b: self._apply_to_active_editor(lambda ed: ed.toggle_bold(b)))
+        self.floating_bar.italicToggled.connect(lambda i: self._apply_to_active_editor(lambda ed: ed.toggle_italic(i)))
+        self.floating_bar.underlineToggled.connect(lambda u: self._apply_to_active_editor(lambda ed: ed.toggle_underline(u)))
+        self.floating_bar.strikeToggled.connect(lambda s: self._apply_to_active_editor(lambda ed: ed.toggle_strike(s)))
+        self.floating_bar.alignChanged.connect(lambda a: self._apply_to_active_editor(lambda ed: ed.set_alignment(a)))
+        self.floating_bar.colorChanged.connect(lambda c: self._apply_to_active_editor(lambda ed: ed.set_text_color(c)))
         self.floating_bar.reflowToggled.connect(self._on_reflow_toggled)
-        self.floating_bar.revertRequested.connect(lambda: self._active_editor_page and self._active_editor_page.cancel_active_editor())
-        self.floating_bar.doneRequested.connect(lambda: self._active_editor_page and self._active_editor_page.commit_active_editor())
+        self.floating_bar.revertRequested.connect(lambda: self._finish_active_editor(commit=False))
+        self.floating_bar.doneRequested.connect(lambda: self._finish_active_editor(commit=True))
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -493,6 +513,7 @@ class MainWindow(QMainWindow):
     def _callbacks_for(self, tab: DocumentTab) -> dict:
         return {
             "editor_opened": lambda pw, ed: self._on_editor_opened(tab, pw, ed),
+            "editor_closed": lambda pw, ed: self._on_editor_closed(pw, ed),
             "edit_committed": lambda pno, op: self._on_in_place_edit_committed(tab, pno, op),
             "annot_added": lambda pno, kind, item: self._on_annot_added(tab, pno, kind, item),
             "annot_removed": lambda pno, kind, item: self._on_annot_removed(tab, pno, kind, item),
@@ -504,6 +525,9 @@ class MainWindow(QMainWindow):
         self.ribbon.update_page_info(tab.current_page, tab.engine.page_count)
 
     def _on_tab_changed(self, idx: int) -> None:
+        page = self._get_active_editor_page()
+        if page is not None:
+            page.commit_active_editor()
         self._hide_floating_bar()
         if idx < 0 or idx >= self.doc_stack.count():
             self.sidebar.set_engine(None)
@@ -525,6 +549,10 @@ class MainWindow(QMainWindow):
         if idx < 0 or idx >= self.doc_stack.count():
             return
         w = self.doc_stack.widget(idx)
+        page = self._get_active_editor_page()
+        if isinstance(w, DocumentTab) and page is not None and page in w.page_widgets:
+            page.cancel_active_editor()
+            self._hide_floating_bar()
         self.doc_stack.removeWidget(w)
         self.tabs.removeTab(idx)
         if w:
@@ -539,7 +567,7 @@ class MainWindow(QMainWindow):
     def _on_scroll(self, tab: DocumentTab) -> None:
         if tab is not self.current_tab() or not tab.page_widgets:
             return
-        if self._active_editor is not None:
+        if self._get_active_editor() is not None:
             self._position_floating_bar()
         if tab._programmatic_scroll:
             return
@@ -560,14 +588,55 @@ class MainWindow(QMainWindow):
             self.sidebar.set_current_page(best)
 
     def _on_page_interacted(self, tab: DocumentTab, page_idx: int) -> None:
+        active_page = self._get_active_editor_page()
+        if active_page is not None and active_page.page_idx != page_idx and active_page in tab.page_widgets:
+            active_page.commit_active_editor()
         if tab.current_page != page_idx:
             tab.current_page = page_idx
             self.ribbon.update_page_info(page_idx, tab.engine.page_count)
             self.sidebar.set_current_page(page_idx)
 
+    def _get_active_editor(self) -> InPlaceTextEditor | None:
+        ed = self._active_editor
+        if ed is None:
+            return None
+        if not shiboken6.isValid(ed):
+            self._hide_floating_bar()
+            return None
+        return ed
+
+    def _get_active_editor_page(self) -> PDFPageWidget | None:
+        page = self._active_editor_page
+        if page is None:
+            return None
+        if not shiboken6.isValid(page):
+            self._hide_floating_bar()
+            return None
+        return page
+
+    def _apply_to_active_editor(self, fn) -> None:
+        ed = self._get_active_editor()
+        if ed is not None:
+            fn(ed)
+
+    def _finish_active_editor(self, commit: bool) -> None:
+        page = self._get_active_editor_page()
+        if page is None:
+            self._hide_floating_bar()
+            return
+        if commit:
+            page.commit_active_editor()
+        else:
+            page.cancel_active_editor()
+
     def _on_editor_opened(self, tab: DocumentTab, page_widget: PDFPageWidget, editor: InPlaceTextEditor) -> None:
+        prev_page = self._get_active_editor_page()
+        if prev_page is not None and prev_page is not page_widget:
+            prev_page.commit_active_editor()
         self._active_editor = editor
         self._active_editor_page = page_widget
+        ed_ref = weakref.ref(editor)
+        editor.destroyed.connect(lambda _obj=None, r=ed_ref: self._on_editor_destroyed(r()))
         editor.formatStateChanged.connect(self._sync_floating_bar)
         editor.heightChanged.connect(lambda _h: self._position_floating_bar())
         self._sync_floating_bar()
@@ -575,8 +644,18 @@ class MainWindow(QMainWindow):
         self.floating_bar.show()
         self.floating_bar.raise_()
 
+    def _on_editor_closed(self, page_widget: PDFPageWidget, editor: InPlaceTextEditor) -> None:
+        if self._active_editor is editor or self._active_editor_page is page_widget:
+            self._hide_floating_bar()
+
+    def _on_editor_destroyed(self, editor: object | None) -> None:
+        if self._active_editor is None:
+            return
+        if editor is self._active_editor or not shiboken6.isValid(self._active_editor):
+            self._hide_floating_bar()
+
     def _sync_floating_bar(self) -> None:
-        ed = self._active_editor
+        ed = self._get_active_editor()
         if ed is None:
             return
         st = ed.current_format_state()
@@ -592,7 +671,7 @@ class MainWindow(QMainWindow):
         )
 
     def _position_floating_bar(self) -> None:
-        ed = self._active_editor
+        ed = self._get_active_editor()
         if ed is None or not ed.isVisible():
             return
         top_left = ed.mapTo(self, QPoint(0, 0))
@@ -610,8 +689,9 @@ class MainWindow(QMainWindow):
         self.floating_bar.hide()
 
     def _on_reflow_toggled(self, enabled: bool) -> None:
-        if self._active_editor is not None:
-            self._active_editor.reflow_enabled = enabled
+        ed = self._get_active_editor()
+        if ed is not None:
+            ed.reflow_enabled = enabled
 
     def _on_in_place_edit_committed(self, tab: DocumentTab, page_idx: int, op: TextEditOp) -> None:
         self._hide_floating_bar()
@@ -620,9 +700,10 @@ class MainWindow(QMainWindow):
         tab.redo_stack.clear()
         tab.engine.set_in_place_edit(op)
         self._rebuild_tab_pages(tab)
-        self.sidebar.refresh_annotations()
-        self.sidebar.refresh_thumbnails()
-        self.status_bar.showMessage(f"Vector text edit applied on Page {page_idx + 1}")
+        if tab is self.current_tab():
+            self.sidebar.refresh_annotations()
+            self.sidebar.refresh_thumbnails()
+            self.status_bar.showMessage(f"Vector text edit applied on Page {page_idx + 1}")
 
     def _on_annot_added(self, tab: DocumentTab, page_idx: int, kind: str, item: object) -> None:
         tab.undo_stack.append(_UndoEntry(kind=kind, page_idx=page_idx, payload=item))
@@ -659,6 +740,9 @@ class MainWindow(QMainWindow):
     def redo(self) -> None:
         tab = self.current_tab()
         if tab is None or not tab.redo_stack:
+            return
+        tab.commit_any_active_editor()
+        if not tab.redo_stack:
             return
         entry = tab.redo_stack.pop()
         tab.undo_stack.append(entry)
@@ -701,6 +785,10 @@ class MainWindow(QMainWindow):
             self._set_active_tool("select")
 
     def _set_active_tool(self, tool: str) -> None:
+        tab = self.current_tab()
+        if tab and tool != self.tool_state["tool"]:
+            tab.commit_any_active_editor()
+            self._hide_floating_bar()
         self.tool_state["tool"] = tool
         if tool == "highlighter":
             self.tool_state["color"] = "#eab308"
@@ -709,7 +797,6 @@ class MainWindow(QMainWindow):
         elif tool == "pen":
             self.tool_state["width"] = 3.0
             self.tool_state["opacity"] = 1.0
-        tab = self.current_tab()
         if tab:
             for pw in tab.page_widgets:
                 pw.set_tool_state(**self.tool_state)
@@ -722,6 +809,8 @@ class MainWindow(QMainWindow):
         if tab is None:
             QMessageBox.information(self, "Personal PDF Suite", "Please open a PDF document first.")
             return
+        if action not in ("copy_selection", "pick_color"):
+            tab.commit_any_active_editor()
 
         if action == "copy_selection":
             texts = [pw.get_selected_text() for pw in tab.page_widgets if pw.get_selected_text()]
@@ -936,18 +1025,23 @@ class MainWindow(QMainWindow):
                 self.status_bar.showMessage(f"Extracted clean text to {path}")
 
     def _replace_tab_document(self, tab: DocumentTab, new_bytes: bytes) -> None:
+        tab.commit_any_active_editor()
+        if tab is self.current_tab():
+            self._hide_floating_bar()
         old_path = tab.engine.file_path
         old_name = tab.engine.name
         tab.engine = PDFDocumentEngine(new_bytes, name=old_name, file_path=old_path)
         tab.undo_stack.clear()
         tab.redo_stack.clear()
         self._rebuild_tab_pages(tab)
-        self.sidebar.set_engine(tab.engine, min(tab.current_page, max(0, tab.engine.page_count - 1)))
+        if tab is self.current_tab():
+            self.sidebar.set_engine(tab.engine, min(tab.current_page, max(0, tab.engine.page_count - 1)))
 
     def open_metadata_dialog(self) -> None:
         tab = self.current_tab()
         if not tab:
             return
+        tab.commit_any_active_editor()
         cur_bytes = tab.engine.build_final_pdf_bytes()
         dlg = MetadataDialog(get_metadata(cur_bytes), self)
         if dlg.exec():
@@ -1049,6 +1143,7 @@ class MainWindow(QMainWindow):
             tab.zoom = max(0.25, min(4.0, int(label[:-1]) / 100.0))
         tab.refresh_all_pages()
         self.ribbon.set_zoom_label(label)
+        self._position_floating_bar()
 
     def step_zoom(self, factor: float) -> None:
         tab = self.current_tab()
@@ -1058,11 +1153,13 @@ class MainWindow(QMainWindow):
         tab.zoom = max(0.25, min(4.0, tab.zoom * factor))
         tab.refresh_all_pages()
         self.ribbon.set_zoom_label(f"{int(round(tab.zoom * 100))}%")
+        self._position_floating_bar()
 
     def rotate_clockwise(self) -> None:
         tab = self.current_tab()
         if not tab:
             return
+        tab.commit_any_active_editor()
         tab.rotation = (tab.rotation + 90) % 360
         tab.refresh_all_pages()
 
@@ -1096,6 +1193,7 @@ class MainWindow(QMainWindow):
         tab = self.current_tab()
         if tab and tab.zoom_mode in ("Fit Width", "Fit Page"):
             tab.refresh_all_pages()
+        self._position_floating_bar()
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():

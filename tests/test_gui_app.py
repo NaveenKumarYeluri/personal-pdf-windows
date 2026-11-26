@@ -5,8 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pymupdf
-from PySide6.QtCore import QPoint, Qt
+import shiboken6
+from PySide6.QtCore import QEvent, QPoint, Qt
 from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
 
 from app.ui.main_window import MainWindow
 
@@ -103,10 +105,18 @@ def test_gui_load_search_theme_and_sequential_in_place_editing(qtbot, tmp_path):
     assert tab.verticalScrollBar().value() == scroll_before
     assert pw1.active_editor.textCursor().selectedText().strip() != ""
 
-    # Test Esc revert cleanly cancels without modifying PDF
+    # Test Esc revert cleanly cancels without modifying PDF and hides floating bar
     QTest.keyClick(pw1.active_editor, Qt.Key_Escape)
+    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    qtbot.wait(10)
     assert pw1.active_editor is None
+    assert win._active_editor is None
+    assert not win.floating_bar.isVisible()
     assert not tab.engine.in_place_edits.get(0)
+
+    # Scrolling right after Esc must not raise on deleted InPlaceTextEditor
+    tab.verticalScrollBar().setValue(scroll_before + 40)
+    tab.verticalScrollBar().setValue(scroll_before)
 
     # 6. Click again, edit text + bold formatting via FloatingFormatBar, then click Paragraph 2 directly
     QTest.mouseClick(pw1, Qt.LeftButton, Qt.NoModifier, QPoint(cx, cy))
@@ -121,13 +131,16 @@ def test_gui_load_search_theme_and_sequential_in_place_editing(qtbot, tmp_path):
     cy2 = int(((blk2.rect[1] + blk2.rect[3]) / 2.0) * pw1.zoom)
     QTest.mouseClick(pw1, Qt.LeftButton, Qt.NoModifier, QPoint(cx2, cy2))
 
-    # Previous edit must have committed automatically and new editor opened on blk2
+    # Previous edit must have committed automatically and new editor opened on the live page widget
+    assert tab.page_widgets[0] is pw1
     assert len(tab.engine.in_place_edits.get(0, {})) == 1
     assert pw1.active_editor is not None
     pw1.active_editor.selectAll()
     QTest.keyClicks(pw1.active_editor, "GUI Edited Paragraph Two")
     win.floating_bar.btn_done.click()
+    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
     assert len(tab.engine.in_place_edits.get(0, {})) == 2
+    assert not win.floating_bar.isVisible()
 
     # 7. Save final vector PDF to disk and verify contents
     out_pdf = tmp_path / "gui_saved.pdf"
@@ -143,3 +156,73 @@ def test_gui_load_search_theme_and_sequential_in_place_editing(qtbot, tmp_path):
     # 8. Test Undo reverts latest edit
     win.undo()
     assert len(tab.engine.in_place_edits.get(0, {})) == 1
+
+
+def test_scroll_after_editor_cancel_unchanged_commit_and_deletion(qtbot):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+
+    tab = win.load_sample_pdf()
+    assert tab is not None
+    win.ribbon.set_mode("edit")
+
+    pw0 = tab.page_widgets[0]
+    pw1 = tab.page_widgets[1]
+    blk0 = tab.engine.extract_text_blocks(0)[0]
+    cx0 = int(((blk0.rect[0] + blk0.rect[2]) / 2.0) * pw0.zoom)
+    cy0 = int(((blk0.rect[1] + blk0.rect[3]) / 2.0) * pw0.zoom)
+
+    # 1. Cancel via FloatingFormatBar revert button, flush deleteLater, then scroll
+    QTest.mouseClick(pw0, Qt.LeftButton, Qt.NoModifier, QPoint(cx0, cy0))
+    assert pw0.active_editor is not None
+    assert win.floating_bar.isVisible()
+    win.floating_bar.btn_revert.click()
+    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    qtbot.wait(10)
+    assert pw0.active_editor is None
+    assert win._active_editor is None
+    assert not win.floating_bar.isVisible()
+    tab.verticalScrollBar().setValue(120)
+    tab.verticalScrollBar().setValue(0)
+
+    # 2. Commit unchanged text via btn_done, flush deleteLater, then scroll
+    QTest.mouseClick(pw0, Qt.LeftButton, Qt.NoModifier, QPoint(cx0, cy0))
+    assert pw0.active_editor is not None
+    win.floating_bar.btn_done.click()
+    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    qtbot.wait(10)
+    assert pw0.active_editor is None
+    assert win._active_editor is None
+    assert not win.floating_bar.isVisible()
+    tab.verticalScrollBar().setValue(140)
+    tab.verticalScrollBar().setValue(0)
+
+    # 3. Edit block on Page 1, then click on Page 2 to commit Page 1 cleanly
+    QTest.mouseClick(pw0, Qt.LeftButton, Qt.NoModifier, QPoint(cx0, cy0))
+    assert pw0.active_editor is not None
+    pw0.active_editor.selectAll()
+    QTest.keyClicks(pw0.active_editor, "Modified Heading On Page One")
+    QTest.mouseClick(pw1, Qt.LeftButton, Qt.NoModifier, QPoint(10, 10))
+    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert pw0.active_editor is None
+    assert len(tab.engine.in_place_edits.get(0, {})) == 1
+    assert not win.floating_bar.isVisible()
+
+    # 4. Defense-in-depth: even if C++ InPlaceTextEditor is deleted externally, scroll and bar actions do not crash
+    QTest.mouseClick(pw0, Qt.LeftButton, Qt.NoModifier, QPoint(cx0, cy0))
+    ed = win._active_editor
+    assert ed is not None
+    shiboken6.delete(ed)
+    tab.verticalScrollBar().setValue(80)
+    win.floating_bar.btn_bold.click()
+    assert win._active_editor is None
+    assert not win.floating_bar.isVisible()
+
+    # 5. Closing a tab while an editor is open cleanly clears active editor & floating bar
+    QTest.mouseClick(pw0, Qt.LeftButton, Qt.NoModifier, QPoint(cx0, cy0))
+    assert win._active_editor is not None
+    win._close_tab(0)
+    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert win._active_editor is None
+    assert not win.floating_bar.isVisible()

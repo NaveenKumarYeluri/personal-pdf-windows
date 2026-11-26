@@ -6,6 +6,7 @@ import math
 import uuid
 
 import pymupdf
+import shiboken6
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
@@ -48,6 +49,7 @@ class PDFPageWidget(QWidget):
     """Single PDF page display with interactive annotation & vector text-edit overlays."""
 
     inPlaceEditorOpened = Signal(object, object)  # (page_widget, editor)
+    inPlaceEditorClosed = Signal(object, object)  # (page_widget, editor)
     inPlaceEditCommitted = Signal(int, object)  # (page_idx, TextEditOp)
     annotationAdded = Signal(int, str, object)  # (page_idx, kind, item)
     annotationRemoved = Signal(int, str, object)
@@ -128,7 +130,10 @@ class PDFPageWidget(QWidget):
         self.setFixedSize(disp_w, disp_h)
 
         if self.active_editor is not None:
-            self.active_editor.sync_zoom(self.zoom)
+            if shiboken6.isValid(self.active_editor):
+                self.active_editor.sync_zoom(self.zoom)
+            else:
+                self.active_editor = None
         self.update()
 
     def set_view_params(self, zoom: float, rotation: int) -> None:
@@ -245,6 +250,9 @@ class PDFPageWidget(QWidget):
         if ed is None:
             return None
         self.active_editor = None
+        if not shiboken6.isValid(ed):
+            self.inPlaceEditorClosed.emit(self, ed)
+            return None
 
         blk = ed.pdf_block
         new_text = ed.toPlainText().strip()
@@ -260,6 +268,7 @@ class PDFPageWidget(QWidget):
         is_new = ed.is_new_block
         ed.hide()
         ed.deleteLater()
+        self.inPlaceEditorClosed.emit(self, ed)
 
         # Skip committing unchanged blocks
         if not is_new and new_text == blk.plain_text.strip() and clean_html == blk.html:
@@ -294,8 +303,10 @@ class PDFPageWidget(QWidget):
         if ed is None:
             return
         self.active_editor = None
-        ed.hide()
-        ed.deleteLater()
+        if shiboken6.isValid(ed):
+            ed.hide()
+            ed.deleteLater()
+        self.inPlaceEditorClosed.emit(self, ed)
 
     def clear_text_selection(self) -> None:
         self._selected_quads = []
@@ -310,6 +321,8 @@ class PDFPageWidget(QWidget):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         self.pageInteracted.emit(self.page_idx)
+        if not shiboken6.isValid(self) or self.parent() is None:
+            return
         if event.button() != Qt.LeftButton:
             return super().mousePressEvent(event)
 
@@ -318,6 +331,8 @@ class PDFPageWidget(QWidget):
         # Clicking outside active editor commits it first
         if self.active_editor is not None:
             self.commit_active_editor()
+            if not shiboken6.isValid(self) or self.parent() is None:
+                return
 
         # Check overlay item drag/resize in interactive modes
         if self.active_tool in ("select", "edit_text", "move", "stamp", "whiteout", "redact"):
