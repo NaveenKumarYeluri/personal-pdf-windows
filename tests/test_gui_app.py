@@ -437,3 +437,30 @@ def test_insert_image_preserves_aspect_ratio_and_rejects_corrupt(qtbot, tmp_path
     win._on_tool_action("insert_image", {})
     assert len(warnings) == 1
     assert len(tab.engine.stamps[0]) == 2
+
+
+def test_word_flow_guards_image_only_pdf(qtbot, monkeypatch):
+    import io
+    from PIL import Image
+    from PySide6.QtWidgets import QMessageBox
+
+    img_buf = io.BytesIO()
+    Image.new("RGB", (200, 200), (240, 240, 240)).save(img_buf, format="PNG")
+    doc = pymupdf.open()
+    for _ in range(2):
+        p = doc.new_page(width=400, height=600)
+        p.insert_image(pymupdf.Rect(20, 20, 380, 580), stream=img_buf.getvalue())
+    scanned_bytes = doc.tobytes()
+    doc.close()
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+    tab = win.open_pdf_bytes(scanned_bytes, "scanned.pdf")
+    assert tab is not None and tab.engine.page_count == 2
+
+    notices = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **kw: notices.append(a))
+    win._on_tool_action("open_word_flow", {})
+    assert len(notices) == 1
+    assert tab.engine.page_count == 2

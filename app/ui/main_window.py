@@ -1070,6 +1070,16 @@ class MainWindow(QMainWindow):
             for pno in range(tab.engine.page_count):
                 for blk in tab.engine.extract_text_blocks(pno):
                     blocks_html.append(blk.html)
+            if not blocks_html and tab.engine.page_count > 0:
+                doc = tab.engine._get_preview_doc()
+                if any(pg.get_images() for pg in doc):
+                    QMessageBox.information(
+                        self,
+                        "Word-Flow Editor",
+                        "No editable vector text blocks were found in this document (it appears to be a scanned or image-only PDF).\n\n"
+                        "Use Add Text or Annotation tools to add overlays without replacing scanned pages.",
+                    )
+                    return
             dlg = WordFlowDialog("".join(blocks_html) or "<p>Type document here...</p>", self)
             if dlg.exec():
                 pw_pt, ph_pt = tab.engine.get_page_size(0)
