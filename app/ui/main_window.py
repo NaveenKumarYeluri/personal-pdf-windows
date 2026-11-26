@@ -950,34 +950,12 @@ class MainWindow(QMainWindow):
             if path:
                 with open(path, "rb") as f:
                     img_bytes = f.read()
-                pw_pt, ph_pt = tab.engine.get_page_size(tab.current_page)
-                stp = StampItem(
-                    page_idx=tab.current_page,
-                    kind="image",
-                    rect=(pw_pt / 2 - 90, ph_pt / 2 - 60, pw_pt / 2 + 90, ph_pt / 2 + 60),
-                    opacity=1.0,
-                    rotation=0.0,
-                    image_bytes=img_bytes,
-                )
-                tab.engine.stamps.setdefault(tab.current_page, []).append(stp)
-                self._on_annot_added(tab, tab.current_page, "stamp", stp)
-                tab.page_widgets[tab.current_page].update()
+                self._place_image_overlay(tab, img_bytes, max_w=220.0, max_h=220.0)
 
         elif action == "open_signature":
             dlg = SignatureDialog(self)
             if dlg.exec() and dlg.result_png_bytes:
-                pw_pt, ph_pt = tab.engine.get_page_size(tab.current_page)
-                stp = StampItem(
-                    page_idx=tab.current_page,
-                    kind="image",
-                    rect=(pw_pt / 2 - 95, ph_pt / 2 - 38, pw_pt / 2 + 95, ph_pt / 2 + 38),
-                    opacity=1.0,
-                    rotation=0.0,
-                    image_bytes=dlg.result_png_bytes,
-                )
-                tab.engine.stamps.setdefault(tab.current_page, []).append(stp)
-                self._on_annot_added(tab, tab.current_page, "stamp", stp)
-                tab.page_widgets[tab.current_page].update()
+                self._place_image_overlay(tab, dlg.result_png_bytes, max_w=190.0, max_h=90.0)
 
         elif action == "flatten_forms":
             cur_bytes = tab.engine.build_final_pdf_bytes()
@@ -1125,6 +1103,36 @@ class MainWindow(QMainWindow):
             if path:
                 write_bytes_atomic(path, extract_clean_text(cur_bytes).encode("utf-8"))
                 self.status_bar.showMessage(f"Extracted clean text to {path}")
+
+    def _place_image_overlay(
+        self, tab: DocumentTab, img_bytes: bytes, max_w: float, max_h: float
+    ) -> bool:
+        """Place a centered image/signature overlay preserving natural aspect ratio."""
+        img = QImage.fromData(img_bytes)
+        if img.isNull() or img.width() <= 0 or img.height() <= 0:
+            QMessageBox.warning(self, "Insert Image", "The selected image could not be decoded.")
+            return False
+        scale = min(max_w / float(img.width()), max_h / float(img.height()))
+        w_pt = max(24.0, img.width() * scale)
+        h_pt = max(24.0, img.height() * scale)
+        pw_pt, ph_pt = tab.engine.get_page_size(tab.current_page)
+        stp = StampItem(
+            page_idx=tab.current_page,
+            kind="image",
+            rect=(
+                pw_pt / 2.0 - w_pt / 2.0,
+                ph_pt / 2.0 - h_pt / 2.0,
+                pw_pt / 2.0 + w_pt / 2.0,
+                ph_pt / 2.0 + h_pt / 2.0,
+            ),
+            opacity=1.0,
+            rotation=0.0,
+            image_bytes=img_bytes,
+        )
+        tab.engine.stamps.setdefault(tab.current_page, []).append(stp)
+        self._on_annot_added(tab, tab.current_page, "stamp", stp)
+        tab.page_widgets[tab.current_page].update()
+        return True
 
     def _replace_tab_document(self, tab: DocumentTab, new_bytes: bytes) -> None:
         tab.commit_any_active_editor()

@@ -400,3 +400,40 @@ def test_stamp_pixmap_cached_across_repaints(qtbot):
     first_cache_key = pw0._stamp_pixmap_cache[key].cacheKey()
     pw0.grab()
     assert pw0._stamp_pixmap_cache[key].cacheKey() == first_cache_key
+
+
+def test_insert_image_preserves_aspect_ratio_and_rejects_corrupt(qtbot, tmp_path, monkeypatch):
+    from PIL import Image
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+    tab = win.load_sample_pdf()
+
+    portrait_path = tmp_path / "portrait.png"
+    Image.new("RGB", (200, 400), (37, 99, 235)).save(portrait_path)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **kw: (str(portrait_path), "Images (*.png)"))
+    win._on_tool_action("insert_image", {})
+    stp = tab.engine.stamps[0][-1]
+    w_pt = stp.rect[2] - stp.rect[0]
+    h_pt = stp.rect[3] - stp.rect[1]
+    assert abs((w_pt / h_pt) - 0.5) < 0.02
+
+    wide_path = tmp_path / "wide.png"
+    Image.new("RGB", (400, 100), (22, 163, 74)).save(wide_path)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **kw: (str(wide_path), "Images (*.png)"))
+    win._on_tool_action("insert_image", {})
+    stp2 = tab.engine.stamps[0][-1]
+    w2 = stp2.rect[2] - stp2.rect[0]
+    h2 = stp2.rect[3] - stp2.rect[1]
+    assert abs((w2 / h2) - 4.0) < 0.02
+
+    bad_path = tmp_path / "bad.png"
+    bad_path.write_bytes(b"not an image")
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **kw: warnings.append(a))
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **kw: (str(bad_path), "Images (*.png)"))
+    win._on_tool_action("insert_image", {})
+    assert len(warnings) == 1
+    assert len(tab.engine.stamps[0]) == 2
