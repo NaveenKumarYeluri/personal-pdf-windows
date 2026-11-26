@@ -287,6 +287,8 @@ class PDFDocumentEngine:
         self._working_doc: pymupdf.Document | None = None
         self._text_blocks_cache: dict[int, list[TextBlock]] = {}
         self._preview_flow_blocks: dict[int, list[TextBlock]] = {}
+        self._edit_revision: int = 0
+        self._modified_pages: set[int] = set()
 
         if self.base_pdf_bytes:
             self._open_base_check()
@@ -326,6 +328,15 @@ class PDFDocumentEngine:
             self._working_doc = None
         self._text_blocks_cache.clear()
         self._preview_flow_blocks.clear()
+        self._modified_pages.clear()
+        self._edit_revision += 1
+
+    def get_page_render_revision(self, page_idx: int) -> int:
+        """Return 0 for untouched base pages, or current edit revision for modified/overflowed pages."""
+        if not any(v for v in self.in_place_edits.values()):
+            return 0
+        self._get_preview_doc()
+        return self._edit_revision if page_idx in self._modified_pages else 0
 
     def has_pending_edits_or_annotations(self) -> bool:
         return any(
@@ -664,6 +675,7 @@ class PDFDocumentEngine:
         css = build_mupdf_font_css()
         arch = get_windows_font_archive()
         self._preview_flow_blocks.clear()
+        self._modified_pages.clear()
 
         incoming_queue: list[_PlacedFlowItem] = []
         p_idx = 0
@@ -685,6 +697,7 @@ class PDFDocumentEngine:
                     self._preview_flow_blocks[p_idx] = self.extract_text_blocks(p_idx, use_base=True)
                 p_idx += 1
                 continue
+            self._modified_pages.add(p_idx)
 
             # Extract original text blocks and images on this page BEFORE mutating it
             orig_blocks = self.extract_text_blocks(p_idx, use_base=True) if p_idx < self.get_base_page_count() else []

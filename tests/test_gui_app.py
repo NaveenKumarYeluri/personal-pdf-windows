@@ -464,3 +464,40 @@ def test_word_flow_guards_image_only_pdf(qtbot, monkeypatch):
     win._on_tool_action("open_word_flow", {})
     assert len(notices) == 1
     assert tab.engine.page_count == 2
+
+
+def test_lazy_thumbnails_and_selective_page_rerender(qtbot, monkeypatch):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+
+    tab = win.load_sample_pdf()
+    assert tab is not None
+    # Sidebar starts hidden -> thumbnails are deferred until revealed
+    assert win.sidebar._thumbs_dirty is True
+    assert win.sidebar.thumb_list.count() == 0
+
+    win._toggle_sidebar_tab(0)
+    assert win.sidebar.isVisible()
+    assert win.sidebar._thumbs_dirty is False
+    assert win.sidebar.thumb_list.count() == tab.engine.page_count
+
+    # Editing Page 1 without overflow must NOT re-render untouched Page 2
+    rendered_pages = []
+    orig_render = tab.engine.render_page_rgb
+
+    def _spy_render(pno, zoom=1.0, rotation=0):
+        rendered_pages.append(pno)
+        return orig_render(pno, zoom=zoom, rotation=rotation)
+
+    monkeypatch.setattr(tab.engine, "render_page_rgb", _spy_render)
+    win.ribbon.set_mode("edit")
+    pw0 = tab.page_widgets[0]
+    blk = tab.engine.extract_text_blocks(0)[0]
+    ed = pw0.open_editor_for_block(blk)
+    ed.selectAll()
+    QTest.keyClicks(ed, "Selective Rerender Test")
+    pw0.commit_active_editor()
+
+    assert 0 in rendered_pages
+    assert 1 not in rendered_pages

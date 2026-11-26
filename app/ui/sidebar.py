@@ -31,12 +31,14 @@ class SidebarPanel(QFrame):
         self.setFixedWidth(235)
         self._engine: PDFDocumentEngine | None = None
         self._current_page = 0
+        self._thumbs_dirty = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
 
         self.tabs = QTabWidget()
+        self.tabs.currentChanged.connect(self._on_sidebar_tab_changed)
         layout.addWidget(self.tabs)
 
         # 1. Thumbnails
@@ -82,15 +84,30 @@ class SidebarPanel(QFrame):
         if 0 <= page_idx < self.thumb_list.count():
             self.thumb_list.setCurrentRow(page_idx)
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._thumbs_dirty and self.tabs.currentIndex() == 0:
+            self.refresh_thumbnails(force=True)
+
+    def _on_sidebar_tab_changed(self, idx: int) -> None:
+        if idx == 0 and self._thumbs_dirty and self.isVisible():
+            self.refresh_thumbnails(force=True)
+
     def refresh_all(self) -> None:
         self.refresh_thumbnails()
         self.refresh_outline()
         self.refresh_annotations()
 
-    def refresh_thumbnails(self) -> None:
-        self.thumb_list.clear()
+    def refresh_thumbnails(self, force: bool = False) -> None:
         if self._engine is None or self._engine.needs_password:
+            self.thumb_list.clear()
+            self._thumbs_dirty = False
             return
+        if not force and (not self.isVisible() or self.tabs.currentIndex() != 0):
+            self._thumbs_dirty = True
+            return
+        self._thumbs_dirty = False
+        self.thumb_list.clear()
         for pno in range(self._engine.page_count):
             samples, w, h, stride = self._engine.render_thumbnail_rgb(pno, max_width=132)
             qimg = QImage(samples, w, h, stride, QImage.Format_RGB888).copy()

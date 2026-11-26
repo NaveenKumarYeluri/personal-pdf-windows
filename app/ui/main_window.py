@@ -397,6 +397,11 @@ class MainWindow(QMainWindow):
         else:
             self.sidebar.tabs.setCurrentIndex(tab_idx)
             self.sidebar.show()
+        tab = self.current_tab()
+        if tab and tab.zoom_mode in ("Fit Width", "Fit Page"):
+            QApplication.processEvents()
+            tab.refresh_all_pages()
+            self._position_floating_bar()
 
     def _build_welcome_widget(self) -> QWidget:
         w = QWidget()

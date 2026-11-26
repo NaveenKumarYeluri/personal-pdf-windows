@@ -109,6 +109,7 @@ class PDFPageWidget(QWidget):
         self._panning: bool = False
         self._pan_last_global: QPointF | None = None
         self._stamp_pixmap_cache: dict[tuple[str, int], QPixmap] = {}
+        self._last_render_sig: tuple | None = None
 
         self.active_editor: InPlaceTextEditor | None = None
         self.refresh_render()
@@ -117,16 +118,28 @@ class PDFPageWidget(QWidget):
         """Re-render PDF page pixmap from MuPDF onto crisp white paper at HiDPI resolution."""
         if self.page_idx >= self.engine.page_count:
             return
+        dpr = max(1.0, float(self.devicePixelRatioF()))
+        page_rev = self.engine.get_page_render_revision(self.page_idx)
+        sig = (id(self.engine), page_rev, self.page_idx, round(self.zoom, 4), self.rotation % 360, round(dpr, 2))
+        if self._pixmap is not None and self._last_render_sig == sig:
+            if self.active_editor is not None:
+                if shiboken6.isValid(self.active_editor):
+                    self.active_editor.sync_zoom(self.zoom)
+                else:
+                    self.active_editor = None
+            self.update()
+            return
+
         w_pt, h_pt = self.engine.get_page_size(self.page_idx)
         self._page_w_pt, self._page_h_pt = w_pt, h_pt
 
-        dpr = max(1.0, float(self.devicePixelRatioF()))
         samples, px_w, px_h, stride = self.engine.render_page_rgb(
             self.page_idx, zoom=self.zoom * dpr, rotation=self.rotation
         )
         img = QImage(samples, px_w, px_h, stride, QImage.Format_RGB888).copy()
         img.setDevicePixelRatio(dpr)
         self._pixmap = QPixmap.fromImage(img)
+        self._last_render_sig = sig
 
         disp_w = max(50, int(round(px_w / dpr)))
         disp_h = max(50, int(round(px_h / dpr)))
