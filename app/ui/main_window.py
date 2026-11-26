@@ -790,6 +790,7 @@ class MainWindow(QMainWindow):
             tab.commit_any_active_editor()
             self._hide_floating_bar()
         self.tool_state["tool"] = tool
+        self.left_rail.btn_pan.setChecked(tool == "pan")
         if tool == "highlighter":
             self.tool_state["color"] = "#eab308"
             self.tool_state["width"] = 14.0
@@ -912,7 +913,15 @@ class MainWindow(QMainWindow):
             self._replace_tab_document(tab, organize_pages(cur_bytes, ops))
 
         elif action == "rotate_cw":
-            self.rotate_clockwise()
+            cur_page = tab.current_page
+            cur_bytes = tab.engine.build_final_pdf_bytes()
+            ops = [
+                PageOp(original_index=i, rotation_delta=(90 if i == cur_page else 0))
+                for i in range(tab.engine.page_count)
+            ]
+            self._replace_tab_document(tab, organize_pages(cur_bytes, ops))
+            self.go_to_page(cur_page)
+            self.status_bar.showMessage(f"Rotated Page {cur_page + 1} 90° clockwise")
 
         elif action == "open_merge":
             dlg = MergeDialog(tab.engine.name, self)

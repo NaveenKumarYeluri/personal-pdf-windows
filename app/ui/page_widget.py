@@ -19,7 +19,7 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
 )
-from PySide6.QtWidgets import QInputDialog, QWidget
+from PySide6.QtWidgets import QInputDialog, QScrollArea, QWidget
 
 from app.core.ligatures import heal_pdf_text
 from app.core.models import (
@@ -106,6 +106,8 @@ class PDFPageWidget(QWidget):
         self._drag_mode: str = ""  # "move" or "resize"
         self._drag_start_pt: tuple[float, float] = (0.0, 0.0)
         self._drag_orig_rect: tuple[float, float, float, float] = (0, 0, 0, 0)
+        self._panning: bool = False
+        self._pan_last_global: QPointF | None = None
 
         self.active_editor: InPlaceTextEditor | None = None
         self.refresh_render()
@@ -164,18 +166,38 @@ class PDFPageWidget(QWidget):
 
         if tool != "edit_text":
             self._hover_block = None
+        self._panning = False
+        self._pan_last_global = None
         if tool == "pan":
             self.setCursor(Qt.OpenHandCursor)
-        elif tool in ("edit_text", "add_text", "select"):
+        elif tool in ("edit_text", "select"):
             self.setCursor(Qt.IBeamCursor if tool == "select" else Qt.ArrowCursor)
+        elif tool == "add_text":
+            self.setCursor(Qt.IBeamCursor)
         elif tool in ("pen", "highlighter", "rect", "ellipse", "line", "arrow", "whiteout", "redact"):
             self.setCursor(Qt.CrossCursor)
         else:
             self.setCursor(Qt.ArrowCursor)
         self.update()
 
+    def _find_scroll_area(self) -> QScrollArea | None:
+        parent = self.parentWidget()
+        while parent is not None:
+            if isinstance(parent, QScrollArea):
+                return parent
+            parent = parent.parentWidget()
+        return None
+
     def _to_pdf_pt(self, pos: QPointF) -> tuple[float, float]:
-        return float(pos.x()) / self.zoom, float(pos.y()) / self.zoom
+        wx, wy = float(pos.x()) / self.zoom, float(pos.y()) / self.zoom
+        rot = self.rotation % 360
+        if rot == 90:
+            return wy, self._page_h_pt - wx
+        if rot == 180:
+            return self._page_w_pt - wx, self._page_h_pt - wy
+        if rot == 270:
+            return self._page_w_pt - wy, wx
+        return wx, wy
 
     def _to_widget_rect(self, r: tuple[float, float, float, float]) -> QRectF:
         return QRectF(
@@ -340,6 +362,19 @@ class PDFPageWidget(QWidget):
             if not shiboken6.isValid(self) or self.parent() is None:
                 return
 
+        if self.active_tool == "pan":
+            self._panning = True
+            self._pan_last_global = event.globalPosition()
+            self.setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
+
+        if self.active_tool in ("edit_text", "add_text") and (self.rotation % 360) != 0:
+            win = self.window()
+            if hasattr(win, "statusBar") and win.statusBar():
+                win.statusBar().showMessage("Reset view rotation to 0° to edit or add text in-place")
+            return
+
         # Check overlay item drag/resize in interactive modes
         if self.active_tool in ("select", "edit_text", "move", "stamp", "whiteout", "redact"):
             hit, mode = self._hit_overlay_item(px, py)
@@ -417,6 +452,18 @@ class PDFPageWidget(QWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._panning and self._pan_last_global is not None:
+            cur_g = event.globalPosition()
+            dx = int(round(cur_g.x() - self._pan_last_global.x()))
+            dy = int(round(cur_g.y() - self._pan_last_global.y()))
+            self._pan_last_global = cur_g
+            sa = self._find_scroll_area()
+            if sa is not None:
+                sa.horizontalScrollBar().setValue(sa.horizontalScrollBar().value() - dx)
+                sa.verticalScrollBar().setValue(sa.verticalScrollBar().value() - dy)
+            event.accept()
+            return
+
         px, py = self._to_pdf_pt(event.position())
 
         if self._drag_mode and self.selected_item is not None:
@@ -455,7 +502,7 @@ class PDFPageWidget(QWidget):
             self._erase_at(px, py)
             return
 
-        if self.active_tool == "edit_text":
+        if self.active_tool == "edit_text" and (self.rotation % 360) == 0:
             blk = self.engine.find_block_at(self.page_idx, px, py)
             if blk != self._hover_block:
                 self._hover_block = blk
@@ -466,6 +513,13 @@ class PDFPageWidget(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if self._panning:
+            self._panning = False
+            self._pan_last_global = None
+            self.setCursor(Qt.OpenHandCursor if self.active_tool == "pan" else Qt.ArrowCursor)
+            event.accept()
+            return
+
         if self._drag_mode:
             self._drag_mode = ""
             self.update()
@@ -649,6 +703,17 @@ class PDFPageWidget(QWidget):
             painter.drawPixmap(0, 0, self._pixmap)
         painter.setPen(QPen(QColor("#cbd5e1"), 1))
         painter.drawRect(0, 0, self.width() - 1, self.height() - 1)
+
+        rot = self.rotation % 360
+        if rot == 90:
+            painter.translate(self.width(), 0)
+            painter.rotate(90)
+        elif rot == 180:
+            painter.translate(self.width(), self.height())
+            painter.rotate(180)
+        elif rot == 270:
+            painter.translate(0, self.height())
+            painter.rotate(270)
 
         # 1. Search highlights
         for idx, hit in enumerate(self.search_hits):
