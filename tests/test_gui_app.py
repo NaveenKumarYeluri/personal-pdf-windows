@@ -8,7 +8,7 @@ import pymupdf
 import shiboken6
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QComboBox
+from PySide6.QtWidgets import QApplication, QComboBox, QPushButton
 
 from app.ui.main_window import MainWindow
 
@@ -352,3 +352,27 @@ def test_pan_add_text_shortcuts_tabs_and_annotation_undo(qtbot):
     rot_doc = pymupdf.open(stream=tab0.engine.build_final_pdf_bytes(), filetype="pdf")
     assert rot_doc[0].rotation == 90
     rot_doc.close()
+
+
+def test_context_bar_replaces_buttons_cleanly_on_mode_switch(qtbot):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+
+    expected = {
+        "edit": ["Edit Text", "Add Text", "Whiteout", "Insert Image", "Word-Flow Editor", "Watermark", "Bates Numbers"],
+        "annotate": ["Select", "Pen", "Highlight", "Underline", "Strike", "Note", "Rect", "Circle", "Line", "Arrow", "Eraser", "Color"],
+        "organize": ["Visual Page Grid", "+ Blank Page", "Rotate 90° CW", "Combine PDFs", "Split PDF"],
+        "forms": ["Place Signature", "Flatten Forms"],
+        "protect": ["Encrypt (AES-256)", "Redact Area"],
+        "export": ["Export Page (PNG)", "Export All Pages", "Extract Text (TXT)"],
+    }
+    for mode, labels in expected.items():
+        win.set_mode(mode)
+        actual = [b.text() for b in win.ribbon.context_bar.findChildren(QPushButton)]
+        assert actual == labels
+        assert win.ribbon.context_bar.isVisible()
+
+    win.set_mode("view")
+    assert win.ribbon.context_bar.findChildren(QPushButton) == []
+    assert not win.ribbon.context_bar.isVisible()

@@ -261,6 +261,8 @@ class RibbonHeader(QWidget):
             item = self.dynamic_layout.takeAt(0)
             w = item.widget()
             if w is not None:
+                w.hide()
+                w.setParent(None)
                 w.deleteLater()
 
     def _add_tool_btn(
