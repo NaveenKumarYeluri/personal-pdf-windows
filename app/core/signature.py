@@ -18,6 +18,9 @@ def extract_signature_ink_bytes(
     to alpha=0, and enhances blue or dark ink with smooth antialiasing.
     """
     im = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    max_dim = 1400
+    if max(im.width, im.height) > max_dim:
+        im.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
     if not remove_bg:
         out = io.BytesIO()
         im.save(out, format="PNG")

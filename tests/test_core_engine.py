@@ -131,3 +131,21 @@ def test_rejects_non_pdf_bytes():
     for bad_bytes in (b"not a pdf at all", buf.getvalue()):
         with pytest.raises(Exception):
             PDFDocumentEngine(bad_bytes, "fake.docx")
+
+
+def test_signature_extraction_downscales_oversized_photo():
+    from PIL import ImageDraw
+
+    im = Image.new("RGB", (3200, 2400), (248, 248, 244))
+    draw = ImageDraw.Draw(im)
+    draw.line([(400, 1200), (2800, 1100)], fill=(15, 23, 42), width=28)
+    raw_buf = io.BytesIO()
+    im.save(raw_buf, format="JPEG", quality=85)
+
+    png = extract_signature_ink_bytes(raw_buf.getvalue(), remove_bg=True, threshold=215)
+    out = Image.open(io.BytesIO(png)).convert("RGBA")
+    assert max(out.width, out.height) <= 1400
+    assert out.getpixel((0, 0))[3] == 0
+    import numpy as np
+
+    assert bool(np.any(np.array(out)[:, :, 3] > 150))
