@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pymupdf
 import shiboken6
-from PySide6.QtCore import QEvent, QPoint, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QComboBox
 
 from app.ui.main_window import MainWindow
 
@@ -226,3 +226,129 @@ def test_scroll_after_editor_cancel_unchanged_commit_and_deletion(qtbot):
     QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
     assert win._active_editor is None
     assert not win.floating_bar.isVisible()
+
+
+def test_pan_add_text_shortcuts_tabs_and_annotation_undo(qtbot):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+
+    tab0 = win.load_sample_pdf()
+    tab1 = win.open_pdf_path(str(SQL_PDF))
+    assert tab0 is not None and tab1 is not None
+    assert win.tabs.count() == 2
+
+    # 1. Search label syncs across tab switch & reordering tabs keeps doc_stack aligned
+    win.ribbon.search_input.setText("Heap")
+    assert len(tab1.search_hits) > 0
+    assert win.ribbon.lbl_search_count.text().startswith("1/")
+    win.tabs.setCurrentIndex(0)
+    assert win.current_tab() is tab0
+    assert win.ribbon.lbl_search_count.text() == "0/0"
+
+    win.tabs.moveTab(0, 1)
+    assert win.tabs.currentIndex() == 1
+    assert win.current_tab() is tab0
+    win.tabs.setCurrentIndex(0)
+    assert win.current_tab() is tab1
+
+    # Close tab1 (SQL_PDF at index 0), leaving tab0 (Sample)
+    win._close_tab(0)
+    assert win.tabs.count() == 1
+    assert win.current_tab() is tab0
+
+    # 2. Pan tool drags scrollbars smoothly and unchecks when switching tools
+    win.left_rail.btn_pan.click()
+    assert win.left_rail.btn_pan.isChecked()
+    pw0 = tab0.page_widgets[0]
+    assert pw0.active_tool == "pan"
+    start_scroll = tab0.verticalScrollBar().value()
+    QTest.mousePress(pw0, Qt.LeftButton, Qt.NoModifier, QPoint(100, 220))
+    QTest.mouseMove(pw0, QPoint(100, 120))
+    QTest.mouseRelease(pw0, Qt.LeftButton, Qt.NoModifier, QPoint(100, 120))
+    assert tab0.verticalScrollBar().value() > start_scroll
+    tab0.verticalScrollBar().setValue(0)
+
+    # 3. Add Text -> Ctrl+Enter commit -> Re-edit newly added text -> Ctrl+Z inside editor
+    win.ribbon.set_mode("edit")
+    assert not win.left_rail.btn_pan.isChecked()
+    win._set_active_tool("add_text")
+    QTest.mouseClick(pw0, Qt.LeftButton, Qt.NoModifier, QPoint(int(60 * pw0.zoom), int(500 * pw0.zoom)))
+    assert pw0.active_editor is not None
+    pw0.active_editor.selectAll()
+    QTest.keyClicks(pw0.active_editor, "First Added Note")
+    QTest.keyClick(pw0.active_editor, Qt.Key_Return, Qt.ControlModifier)
+    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert pw0.active_editor is None
+
+    # Click newly added block in edit_text mode, test Ctrl+Z stays inside editor, then commit update
+    win._set_active_tool("edit_text")
+    added_blk = next(b for b in tab0.engine.extract_text_blocks(0) if "First Added Note" in b.plain_text)
+    ax = int(((added_blk.rect[0] + added_blk.rect[2]) / 2.0) * pw0.zoom)
+    ay = int(((added_blk.rect[1] + added_blk.rect[3]) / 2.0) * pw0.zoom)
+    QTest.mouseClick(pw0, Qt.LeftButton, Qt.NoModifier, QPoint(ax, ay))
+    ed = pw0.active_editor
+    assert ed is not None
+    ed.selectAll()
+    QTest.keyClicks(ed, "Updated Added Note")
+    # Insert a distinct undo step via cursor edit block so Ctrl+Z undoes only "XYZ"
+    cur = ed.textCursor()
+    cur.beginEditBlock()
+    cur.insertText("XYZ")
+    cur.endEditBlock()
+    ed.setFocus()
+    win._shortcut_undo()
+    assert pw0.active_editor is ed  # editor remained open and active!
+    assert "Updated Added Note" in ed.toPlainText()
+    assert "XYZ" not in ed.toPlainText()
+    win.floating_bar.btn_done.click()
+    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+    saved_doc = pymupdf.open(stream=tab0.engine.build_final_pdf_bytes(), filetype="pdf")
+    p0_txt = saved_doc[0].get_text("text")
+    assert "Updated Added Note" in p0_txt
+    assert "First Added Note" not in p0_txt
+    saved_doc.close()
+
+    # 4. Low zoom (75%) must not distort font size on commit
+    win.set_zoom_mode("75%")
+    blk0 = tab0.engine.extract_text_blocks(0)[1]
+    orig_size = blk0.font_size
+    bx = int(((blk0.rect[0] + blk0.rect[2]) / 2.0) * pw0.zoom)
+    by = int(((blk0.rect[1] + blk0.rect[3]) / 2.0) * pw0.zoom)
+    QTest.mouseClick(pw0, Qt.LeftButton, Qt.NoModifier, QPoint(bx, by))
+    assert pw0.active_editor is not None
+    assert abs(pw0.active_editor.current_format_state()["size_pt"] - round(orig_size)) <= 1
+    win.floating_bar.btn_revert.click()
+    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+    # 5. Annotate mode: repeat stamp placement, delete with Undo/Redo support
+    win.ribbon.set_mode("annotate")
+    stamp_cb = win.ribbon.context_bar.findChild(QComboBox)
+    assert stamp_cb is not None
+    stamp_cb.setCurrentText("APPROVED")
+    assert stamp_cb.currentIndex() == 0
+    stamp_cb.setCurrentText("APPROVED")
+    assert len(tab0.engine.stamps.get(0, [])) == 2
+    pw0.selected_item = tab0.engine.stamps[0][-1]
+    QTest.keyClick(pw0, Qt.Key_Delete)
+    assert len(tab0.engine.stamps.get(0, [])) == 1
+    win.undo()
+    assert len(tab0.engine.stamps.get(0, [])) == 2
+    win.redo()
+    assert len(tab0.engine.stamps.get(0, [])) == 1
+
+    # 6. View rotation maps widget coordinates accurately & Organize rotate_cw persists
+    win.set_zoom_mode("100%")
+    win.rotate_clockwise()
+    assert tab0.rotation == 90
+    w_pt, h_pt = tab0.engine.get_page_size(0)
+    # Widget (wx, wy) = (h_pt - py, px) at 100% zoom -> inverse gives (py, h_pt - wx)
+    mapped_x, mapped_y = pw0._to_pdf_pt(QPointF(h_pt - 50.0, 30.0))
+    assert abs(mapped_x - 30.0) < 0.5 and abs(mapped_y - 50.0) < 0.5
+
+    win.ribbon.set_mode("organize")
+    win._on_tool_action("rotate_cw", {})
+    rot_doc = pymupdf.open(stream=tab0.engine.build_final_pdf_bytes(), filetype="pdf")
+    assert rot_doc[0].rotation == 90
+    rot_doc.close()

@@ -18,12 +18,14 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
     QScrollArea,
     QStackedWidget,
     QStatusBar,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -300,6 +302,7 @@ class MainWindow(QMainWindow):
         self.tabs: QTabBar = self.ribbon.inline_tabs
         self.tabs.tabCloseRequested.connect(self._close_tab)
         self.tabs.currentChanged.connect(self._on_tab_changed)
+        self.tabs.tabMoved.connect(self._on_tab_moved)
 
         body.addWidget(self.center_host, stretch=1)
 
@@ -435,10 +438,38 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Shift+S"), self, activated=self.save_as_current_pdf)
         QShortcut(QKeySequence("Ctrl+P"), self, activated=self.print_current_pdf)
         QShortcut(QKeySequence("Ctrl+F"), self, activated=lambda: self.ribbon.search_input.setFocus())
-        QShortcut(QKeySequence("Ctrl+Z"), self, activated=self.undo)
-        QShortcut(QKeySequence("Ctrl+Y"), self, activated=self.redo)
+        QShortcut(QKeySequence("Ctrl+C"), self, activated=self._shortcut_copy)
+        QShortcut(QKeySequence("Ctrl+Z"), self, activated=self._shortcut_undo)
+        QShortcut(QKeySequence("Ctrl+Y"), self, activated=self._shortcut_redo)
         QShortcut(QKeySequence("Ctrl+="), self, activated=lambda: self.step_zoom(1.15))
         QShortcut(QKeySequence("Ctrl+-"), self, activated=lambda: self.step_zoom(0.85))
+
+    def _shortcut_undo(self) -> None:
+        fw = QApplication.focusWidget()
+        if isinstance(fw, (QTextEdit, QLineEdit)):
+            fw.undo()
+            return
+        self.undo()
+
+    def _shortcut_redo(self) -> None:
+        fw = QApplication.focusWidget()
+        if isinstance(fw, (QTextEdit, QLineEdit)):
+            fw.redo()
+            return
+        self.redo()
+
+    def _shortcut_copy(self) -> None:
+        fw = QApplication.focusWidget()
+        if isinstance(fw, (QTextEdit, QLineEdit)):
+            fw.copy()
+            return
+        tab = self.current_tab()
+        if tab is not None:
+            texts = [pw.get_selected_text() for pw in tab.page_widgets if pw.get_selected_text()]
+            joined = "\n".join(texts).strip()
+            if joined:
+                QApplication.clipboard().setText(heal_pdf_text(joined))
+                self.status_bar.showMessage(f"Copied {len(joined)} characters to clipboard")
 
     def _apply_theme(self) -> None:
         self.setStyleSheet(build_stylesheet(self.dark_theme, self.accent_color, self.accent_hover))
@@ -462,6 +493,13 @@ class MainWindow(QMainWindow):
         self.accent_color = color
         self.accent_hover = hover
         self._apply_theme()
+        for i in range(self.doc_stack.count()):
+            w = self.doc_stack.widget(i)
+            if isinstance(w, DocumentTab):
+                w.accent_color = color
+                for pw in w.page_widgets:
+                    pw.accent_color = color
+                    pw.update()
 
     def current_tab(self) -> DocumentTab | None:
         w = self.doc_stack.currentWidget()
@@ -482,7 +520,11 @@ class MainWindow(QMainWindow):
         return self.open_pdf_bytes(data, os.path.basename(path), file_path=path)
 
     def open_pdf_bytes(self, data: bytes, name: str, file_path: str | None = None) -> DocumentTab | None:
-        engine = PDFDocumentEngine(data, name=name, file_path=file_path)
+        try:
+            engine = PDFDocumentEngine(data, name=name, file_path=file_path)
+        except Exception as err:
+            QMessageBox.critical(self, "Open PDF", f"Could not open PDF document:\n{err}")
+            return None
         while engine.needs_password:
             pw, ok = QInputDialog.getText(
                 self, "Encrypted PDF", f"Enter password for {name}:", echo=QLineEdit_Password()
@@ -498,6 +540,7 @@ class MainWindow(QMainWindow):
         self.doc_stack.show()
         self.doc_stack.addWidget(tab)
         idx = self.tabs.addTab(name)
+        self.tabs.setTabData(idx, tab)
         self.tabs.setTabToolTip(idx, file_path or name)
         self.tabs.setCurrentIndex(idx)
         self.doc_stack.setCurrentWidget(tab)
@@ -505,6 +548,7 @@ class MainWindow(QMainWindow):
         self.sidebar.set_engine(engine, 0)
         self.ribbon.update_page_info(0, engine.page_count)
         self.ribbon.set_zoom_label(tab.zoom_mode)
+        self._update_search_label(tab)
         self.status_bar.showMessage(f"Opened {name} ({engine.page_count} pages)")
         return tab
 
@@ -525,6 +569,20 @@ class MainWindow(QMainWindow):
         tab.rebuild_pages(self.tool_state, self._callbacks_for(tab))
         self.ribbon.update_page_info(tab.current_page, tab.engine.page_count)
 
+    def _on_tab_moved(self, from_idx: int, to_idx: int) -> None:
+        w = self.doc_stack.widget(from_idx)
+        if w is None:
+            return
+        cur_tab = self.tabs.tabData(self.tabs.currentIndex())
+        self.doc_stack.blockSignals(True)
+        try:
+            self.doc_stack.removeWidget(w)
+            self.doc_stack.insertWidget(to_idx, w)
+            if isinstance(cur_tab, DocumentTab):
+                self.doc_stack.setCurrentWidget(cur_tab)
+        finally:
+            self.doc_stack.blockSignals(False)
+
     def _on_tab_changed(self, idx: int) -> None:
         page = self._get_active_editor_page()
         if page is not None:
@@ -533,23 +591,30 @@ class MainWindow(QMainWindow):
         if idx < 0 or idx >= self.doc_stack.count():
             self.sidebar.set_engine(None)
             self.ribbon.update_page_info(0, 0)
+            self.ribbon.lbl_search_count.setText("0/0")
             self.doc_stack.hide()
             self.welcome_widget.show()
             return
-        self.doc_stack.setCurrentIndex(idx)
-        tab = self.current_tab()
+        tab = self.tabs.tabData(idx)
+        if not isinstance(tab, DocumentTab):
+            w = self.doc_stack.widget(idx)
+            tab = w if isinstance(w, DocumentTab) else None
         if tab is None:
             return
+        self.doc_stack.setCurrentWidget(tab)
         self.sidebar.set_engine(tab.engine, tab.current_page)
         self.ribbon.update_page_info(tab.current_page, tab.engine.page_count)
         self.ribbon.set_zoom_label(
             tab.zoom_mode if tab.zoom_mode in ("Fit Width", "Fit Page") else f"{int(round(tab.zoom * 100))}%"
         )
+        self._update_search_label(tab)
 
     def _close_tab(self, idx: int) -> None:
         if idx < 0 or idx >= self.doc_stack.count():
             return
-        w = self.doc_stack.widget(idx)
+        w = self.tabs.tabData(idx)
+        if not isinstance(w, QWidget):
+            w = self.doc_stack.widget(idx)
         page = self._get_active_editor_page()
         if isinstance(w, DocumentTab) and page is not None and page in w.page_widgets:
             page.cancel_active_editor()
@@ -562,6 +627,7 @@ class MainWindow(QMainWindow):
             self._hide_floating_bar()
             self.sidebar.set_engine(None)
             self.ribbon.update_page_info(0, 0)
+            self.ribbon.lbl_search_count.setText("0/0")
             self.doc_stack.hide()
             self.welcome_widget.show()
 
