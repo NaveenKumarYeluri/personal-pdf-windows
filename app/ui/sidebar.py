@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QSize, Qt, Signal
-from PySide6.QtGui import QIcon, QImage, QPixmap
+from PySide6.QtCore import QPoint, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -34,6 +34,11 @@ class SidebarPanel(QFrame):
         self._engine: PDFDocumentEngine | None = None
         self._current_page = 0
         self._thumbs_dirty = False
+        self._rendered_thumbs: set[int] = set()
+        self._placeholder_icon = self._make_placeholder_icon()
+        self._thumb_timer = QTimer(self)
+        self._thumb_timer.setInterval(10)
+        self._thumb_timer.timeout.connect(self._render_next_thumb_batch)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -48,6 +53,7 @@ class SidebarPanel(QFrame):
         self.thumb_list.setIconSize(QSize(136, 180))
         self.thumb_list.setSpacing(4)
         self.thumb_list.itemClicked.connect(self._on_thumb_clicked)
+        self.thumb_list.verticalScrollBar().valueChanged.connect(self._render_visible_thumbnails)
         self.tabs.addTab(self.thumb_list, "Pages")
 
         # 2. Bookmarks / Outline
@@ -78,6 +84,16 @@ class SidebarPanel(QFrame):
         av.addWidget(self.annot_list)
         self.tabs.addTab(annot_wrap, "Notes")
 
+    @staticmethod
+    def _make_placeholder_icon() -> QIcon:
+        pm = QPixmap(110, 146)
+        pm.fill(QColor("#ffffff"))
+        p = QPainter(pm)
+        p.setPen(QPen(QColor("#cbd5e1"), 1))
+        p.drawRect(0, 0, pm.width() - 1, pm.height() - 1)
+        p.end()
+        return QIcon(pm)
+
     def set_engine(self, engine: PDFDocumentEngine | None, current_page: int = 0) -> None:
         self._engine = engine
         self._current_page = current_page
@@ -87,15 +103,23 @@ class SidebarPanel(QFrame):
         self._current_page = page_idx
         if 0 <= page_idx < self.thumb_list.count():
             self.thumb_list.setCurrentRow(page_idx)
+            if self.isVisible() and self.tabs.currentIndex() == 0:
+                self.thumb_list.scrollToItem(self.thumb_list.item(page_idx))
+                self._render_visible_thumbnails()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
         if self._thumbs_dirty and self.tabs.currentIndex() == 0:
             self.refresh_thumbnails(force=True)
+        elif self.tabs.currentIndex() == 0 and self._engine is not None:
+            self._render_visible_thumbnails()
 
     def _on_sidebar_tab_changed(self, idx: int) -> None:
-        if idx == 0 and self._thumbs_dirty and self.isVisible():
-            self.refresh_thumbnails(force=True)
+        if idx == 0 and self.isVisible():
+            if self._thumbs_dirty:
+                self.refresh_thumbnails(force=True)
+            else:
+                self._render_visible_thumbnails()
 
     def refresh_all(self) -> None:
         self.refresh_thumbnails()
@@ -103,23 +127,69 @@ class SidebarPanel(QFrame):
         self.refresh_annotations()
 
     def refresh_thumbnails(self, force: bool = False) -> None:
+        self._thumb_timer.stop()
         if self._engine is None or self._engine.needs_password:
             self.thumb_list.clear()
+            self._rendered_thumbs.clear()
             self._thumbs_dirty = False
             return
         if not force and (not self.isVisible() or self.tabs.currentIndex() != 0):
             self._thumbs_dirty = True
             return
         self._thumbs_dirty = False
+        self._rendered_thumbs.clear()
         self.thumb_list.clear()
         for pno in range(self._engine.page_count):
-            samples, w, h, stride = self._engine.render_thumbnail_rgb(pno, max_width=132)
-            qimg = QImage(samples, w, h, stride, QImage.Format_RGB888).copy()
-            item = QListWidgetItem(QIcon(QPixmap.fromImage(qimg)), f"Page {pno + 1}")
+            item = QListWidgetItem(self._placeholder_icon, f"Page {pno + 1}")
             item.setData(Qt.UserRole, pno)
             item.setTextAlignment(Qt.AlignHCenter)
             self.thumb_list.addItem(item)
         self.set_current_page(self._current_page)
+        self._render_visible_thumbnails()
+        if len(self._rendered_thumbs) < self._engine.page_count:
+            self._thumb_timer.start()
+
+    def _render_thumb_for_page(self, pno: int) -> None:
+        if self._engine is None or pno in self._rendered_thumbs:
+            return
+        if not (0 <= pno < self.thumb_list.count()):
+            return
+        samples, w, h, stride = self._engine.render_thumbnail_rgb(pno, max_width=132)
+        qimg = QImage(samples, w, h, stride, QImage.Format_RGB888).copy()
+        self.thumb_list.item(pno).setIcon(QIcon(QPixmap.fromImage(qimg)))
+        self._rendered_thumbs.add(pno)
+
+    def _render_visible_thumbnails(self) -> None:
+        if self._engine is None or not self.isVisible() or self.tabs.currentIndex() != 0:
+            return
+        count = self.thumb_list.count()
+        if count == 0:
+            return
+        vp = self.thumb_list.viewport().rect()
+        top_item = self.thumb_list.itemAt(vp.topLeft() + QPoint(4, 4))
+        bot_item = self.thumb_list.itemAt(vp.bottomLeft() + QPoint(4, -4))
+        start = self.thumb_list.row(top_item) if top_item else max(0, self._current_page - 2)
+        end = (self.thumb_list.row(bot_item) + 2) if bot_item else min(count - 1, start + 6)
+        start = max(0, start - 1)
+        end = min(count - 1, end)
+        for pno in range(start, end + 1):
+            self._render_thumb_for_page(pno)
+
+    def _render_next_thumb_batch(self) -> None:
+        if self._engine is None or self._engine.needs_password or self._thumbs_dirty:
+            self._thumb_timer.stop()
+            return
+        if not self.isVisible() or self.tabs.currentIndex() != 0:
+            return
+        rendered = 0
+        for pno in range(self.thumb_list.count()):
+            if pno not in self._rendered_thumbs:
+                self._render_thumb_for_page(pno)
+                rendered += 1
+                if rendered >= 4:
+                    break
+        if len(self._rendered_thumbs) >= self.thumb_list.count():
+            self._thumb_timer.stop()
 
     def refresh_outline(self) -> None:
         self.outline_list.clear()
@@ -136,7 +206,9 @@ class SidebarPanel(QFrame):
             item.setData(Qt.UserRole, pno)
             self.outline_list.addItem(item)
         if self.outline_list.count() == 0:
-            self.outline_list.addItem("No bookmarks or outline")
+            empty = QListWidgetItem("No bookmarks or outline")
+            empty.setFlags(Qt.NoItemFlags)
+            self.outline_list.addItem(empty)
 
     def refresh_annotations(self) -> None:
         self.annot_list.clear()
@@ -188,7 +260,9 @@ class SidebarPanel(QFrame):
             item.setData(Qt.UserRole, pno)
             self.annot_list.addItem(item)
         if self.annot_list.count() == 0:
-            self.annot_list.addItem("No edits or annotations yet")
+            empty = QListWidgetItem("No edits or annotations yet")
+            empty.setFlags(Qt.NoItemFlags)
+            self.annot_list.addItem(empty)
 
     def _on_thumb_clicked(self, item: QListWidgetItem) -> None:
         pno = item.data(Qt.UserRole)

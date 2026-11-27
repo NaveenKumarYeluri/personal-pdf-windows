@@ -973,3 +973,48 @@ def test_pdf_print_dialog_preview_ranges_and_pdf_output(qtbot, tmp_path, monkeyp
     printed = pymupdf.open(str(out_pdf))
     assert len(printed) == 1
     printed.close()
+
+
+def test_sidebar_active_indicators_and_lazy_expand_collapse(qtbot, monkeypatch):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+
+    tab = win.open_pdf_path(str(SQL_PDF))
+    assert tab is not None
+
+    # Opening a 13-page PDF should only render visible pages initially, not all 13 off-screen pages
+    unrendered_initial = sum(1 for pw in tab.page_widgets if pw.needs_render())
+    assert unrendered_initial >= 10
+
+    # Right-rail buttons reflect active sidebar tab cleanly
+    btn_pages = win._right_rail_tab_buttons[0][0]
+    btn_outline = win._right_rail_tab_buttons[1][0]
+    btn_notes = win._right_rail_tab_buttons[2][0]
+    assert not btn_pages.isChecked()
+
+    win._toggle_sidebar_tab(0)
+    assert win.sidebar.isVisible()
+    assert btn_pages.isChecked() and not btn_outline.isChecked() and not btn_notes.isChecked()
+    assert win.sidebar.tabs.currentIndex() == 0
+
+    # Switching tabs inside sidebar updates active right-rail button immediately
+    win.sidebar.tabs.setCurrentIndex(1)
+    assert btn_outline.isChecked() and not btn_pages.isChecked() and not btn_notes.isChecked()
+
+    # Track page renders during expand/collapse: must only re-render visible page(s), never off-screen pages
+    rendered_pages = []
+    orig_render = tab.engine.render_page_rgb
+
+    def _spy(pno, zoom=1.0, rotation=0):
+        rendered_pages.append(pno)
+        return orig_render(pno, zoom=zoom, rotation=rotation)
+
+    monkeypatch.setattr(tab.engine, "render_page_rgb", _spy)
+    win._toggle_sidebar_tab(2)  # switch to Notes while open
+    assert btn_notes.isChecked() and not btn_outline.isChecked()
+    win._toggle_sidebar_tab(2)  # collapse sidebar
+    assert not win.sidebar.isVisible()
+    assert not btn_pages.isChecked() and not btn_outline.isChecked() and not btn_notes.isChecked()
+    assert len(rendered_pages) <= 2
+    assert 12 not in rendered_pages

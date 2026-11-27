@@ -78,6 +78,7 @@ class PDFPageWidget(QWidget):
         zoom: float = 1.0,
         rotation: int = 0,
         accent_color: str = "#ea2e3f",
+        defer_render: bool = False,
         parent: QWidget | None = None,
     ):
         super().__init__(parent)
@@ -91,6 +92,9 @@ class PDFPageWidget(QWidget):
         self.setFocusPolicy(Qt.StrongFocus)
 
         self._pixmap: QPixmap | None = None
+        self._pixmap_rotation: int = rotation % 360
+        self._pixmap_stale: bool = True
+        self._defer_paint_render: bool = False
         self._page_w_pt = 595.28
         self._page_h_pt = 841.89
 
@@ -130,16 +134,42 @@ class PDFPageWidget(QWidget):
         self._sel_dragged: bool = False
 
         self.active_editor: InPlaceTextEditor | None = None
-        self.refresh_render()
+        if defer_render:
+            self._sync_display_size_only()
+        else:
+            self.refresh_render()
+
+    def _expected_render_sig(self) -> tuple:
+        dpr = max(1.0, float(self.devicePixelRatioF()))
+        page_rev = self.engine.get_page_render_revision(self.page_idx)
+        return (id(self.engine), page_rev, self.page_idx, round(self.zoom, 4), self.rotation % 360, round(dpr, 2))
+
+    def _sync_display_size_only(self) -> None:
+        if self.page_idx >= self.engine.page_count:
+            return
+        w_pt, h_pt = self.engine.get_page_size(self.page_idx)
+        self._page_w_pt, self._page_h_pt = w_pt, h_pt
+        rot = self.rotation % 360
+        disp_w_pt, disp_h_pt = (h_pt, w_pt) if rot in (90, 270) else (w_pt, h_pt)
+        self.setFixedSize(max(50, int(round(disp_w_pt * self.zoom))), max(50, int(round(disp_h_pt * self.zoom))))
+        self._pixmap_stale = self._pixmap is None or self._last_render_sig != self._expected_render_sig()
+        if self.active_editor is not None:
+            if shiboken6.isValid(self.active_editor):
+                self.active_editor.sync_zoom(self.zoom)
+            else:
+                self.active_editor = None
+
+    def needs_render(self) -> bool:
+        return self._pixmap is None or self._last_render_sig != self._expected_render_sig()
 
     def refresh_render(self) -> None:
         """Re-render PDF page pixmap from MuPDF onto crisp white paper at HiDPI resolution."""
         if self.page_idx >= self.engine.page_count:
             return
         dpr = max(1.0, float(self.devicePixelRatioF()))
-        page_rev = self.engine.get_page_render_revision(self.page_idx)
-        sig = (id(self.engine), page_rev, self.page_idx, round(self.zoom, 4), self.rotation % 360, round(dpr, 2))
+        sig = self._expected_render_sig()
         if self._pixmap is not None and self._last_render_sig == sig:
+            self._pixmap_stale = False
             if self.active_editor is not None:
                 if shiboken6.isValid(self.active_editor):
                     self.active_editor.sync_zoom(self.zoom)
@@ -157,6 +187,8 @@ class PDFPageWidget(QWidget):
         img = QImage(samples, px_w, px_h, stride, QImage.Format_RGB888).copy()
         img.setDevicePixelRatio(dpr)
         self._pixmap = QPixmap.fromImage(img)
+        self._pixmap_rotation = self.rotation % 360
+        self._pixmap_stale = False
         self._last_render_sig = sig
 
         disp_w = max(50, int(round(px_w / dpr)))
@@ -170,12 +202,17 @@ class PDFPageWidget(QWidget):
                 self.active_editor = None
         self.update()
 
-    def set_view_params(self, zoom: float, rotation: int) -> None:
+    def set_view_params(self, zoom: float, rotation: int, render_now: bool = True, defer_paint: bool = False) -> None:
         if abs(zoom - self.zoom) > 1e-4 or (rotation % 360) != (self.rotation % 360):
             self.close_active_form_editor()
         self.zoom = zoom
         self.rotation = rotation
-        self.refresh_render()
+        self._defer_paint_render = defer_paint
+        if render_now:
+            self.refresh_render()
+        else:
+            self._sync_display_size_only()
+            self.update()
 
     def set_tool_state(
         self,
@@ -1067,6 +1104,11 @@ class PDFPageWidget(QWidget):
         self._selected_text = heal_pdf_text(" ".join(w[4] for w in matched))
 
     def paintEvent(self, event) -> None:
+        if self._pixmap is None or self._pixmap_rotation != (self.rotation % 360) or (
+            self._pixmap_stale and not self._defer_paint_render
+        ):
+            self.refresh_render()
+
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
@@ -1074,7 +1116,10 @@ class PDFPageWidget(QWidget):
         # Always paint uniform solid white paper before drawing PDF content
         painter.fillRect(self.rect(), QColor("#ffffff"))
         if self._pixmap is not None:
-            painter.drawPixmap(0, 0, self._pixmap)
+            if self._pixmap_stale:
+                painter.drawPixmap(self.rect(), self._pixmap)
+            else:
+                painter.drawPixmap(0, 0, self._pixmap)
         painter.setPen(QPen(QColor("#cbd5e1"), 1))
         painter.drawRect(0, 0, self.width() - 1, self.height() - 1)
 

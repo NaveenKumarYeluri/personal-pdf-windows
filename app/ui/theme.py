@@ -79,6 +79,29 @@ def build_stylesheet(dark: bool = False, accent: str = "#ea2e3f", accent_hover: 
         background-color: {bg_bar};
         border-left: 1px solid {border};
     }}
+    QFrame#Sidebar QTabWidget::pane {{
+        border: none;
+        border-top: 1px solid {border};
+        background-color: {bg_bar};
+    }}
+    QFrame#Sidebar QTabBar::tab {{
+        background-color: transparent;
+        color: {text_secondary};
+        border: 1px solid transparent;
+        border-radius: 6px;
+        padding: 5px 10px;
+        margin: 3px 2px 5px 2px;
+        font-weight: 500;
+    }}
+    QFrame#Sidebar QTabBar::tab:hover {{
+        background-color: {bg_hover};
+        color: {text_primary};
+    }}
+    QFrame#Sidebar QTabBar::tab:selected {{
+        background-color: {accent};
+        color: #ffffff;
+        font-weight: 700;
+    }}
     QScrollArea#ViewerScroll {{
         background-color: {bg_canvas};
         border: none;

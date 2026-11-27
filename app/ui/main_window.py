@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import pymupdf
 import shiboken6
-from PySide6.QtCore import QPoint, QSettings, QSize, Qt, QUrl
+from PySide6.QtCore import QPoint, QSettings, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QCloseEvent,
     QDesktopServices,
@@ -168,7 +168,7 @@ class DocumentTab(QScrollArea):
             pw._hover_widget = None
             pw.clear_text_selection()
             pw.set_tool_state(**tool_state)
-            pw.set_view_params(self.zoom, self.rotation)
+            pw.set_view_params(self.zoom, self.rotation, render_now=False)
 
         for pno in range(len(self.page_widgets), target_count):
             pw = PDFPageWidget(
@@ -177,6 +177,7 @@ class DocumentTab(QScrollArea):
                 zoom=self.zoom,
                 rotation=self.rotation,
                 accent_color=self.accent_color,
+                defer_render=True,
                 parent=self.pages_container,
             )
             pw.set_tool_state(**tool_state)
@@ -193,13 +194,40 @@ class DocumentTab(QScrollArea):
             pw.show()
             self.page_widgets.append(pw)
 
+        self._ensure_scroll_layout()
+        self.refresh_visible_pages(buffer_px=0)
         self._apply_search_highlights()
 
-    def refresh_all_pages(self) -> None:
+    def refresh_all_pages(self, defer_render: bool = False) -> None:
         if self.zoom_mode in ("Fit Width", "Fit Page"):
             self.zoom = self.calculate_fit_zoom()
         for pw in self.page_widgets:
-            pw.set_view_params(self.zoom, self.rotation)
+            pw.set_view_params(self.zoom, self.rotation, render_now=False, defer_paint=defer_render)
+        self._ensure_scroll_layout()
+        if not defer_render:
+            self.refresh_visible_pages(buffer_px=0)
+
+    def refresh_visible_pages(self, buffer_px: int = 200) -> None:
+        if not self.page_widgets:
+            return
+        vbar = self.verticalScrollBar()
+        v_top = vbar.value() - buffer_px
+        v_bot = vbar.value() + max(200, self.viewport().height()) + buffer_px
+        any_rendered = False
+        for pw in self.page_widgets:
+            y0 = pw.y()
+            y1 = y0 + pw.height()
+            if y1 >= v_top and y0 <= v_bot:
+                pw._defer_paint_render = False
+                if pw.needs_render():
+                    pw.refresh_render()
+                any_rendered = True
+        if not any_rendered:
+            idx = max(0, min(self.current_page, len(self.page_widgets) - 1))
+            pw = self.page_widgets[idx]
+            pw._defer_paint_render = False
+            if pw.needs_render():
+                pw.refresh_render()
 
     def _apply_search_highlights(self) -> None:
         by_page: dict[int, list[tuple[int, SearchHit]]] = {}
@@ -321,7 +349,12 @@ class MainWindow(QMainWindow):
         self._active_editor: InPlaceTextEditor | None = None
         self._active_editor_page: PDFPageWidget | None = None
         self._right_rail_buttons: list[tuple[QPushButton, str]] = []
+        self._right_rail_tab_buttons: dict[int, tuple[QPushButton, str]] = {}
         self._prompt_on_close: bool = False
+        self._resize_fit_timer = QTimer(self)
+        self._resize_fit_timer.setSingleShot(True)
+        self._resize_fit_timer.setInterval(55)
+        self._resize_fit_timer.timeout.connect(self._flush_deferred_fit_render)
 
         self._build_ui()
         self._bind_shortcuts()
@@ -430,6 +463,7 @@ class MainWindow(QMainWindow):
         self.sidebar.pageSelected.connect(self.go_to_page)
         self.sidebar.bookmarkAdded.connect(self._on_bookmark_added)
         self.sidebar.bookmarkRemoved.connect(self._on_bookmark_removed)
+        self.sidebar.tabs.currentChanged.connect(lambda _idx: self._sync_right_rail_buttons())
 
     def _build_right_nav_rail(self) -> QFrame:
         rail = QFrame()
@@ -445,15 +479,19 @@ class MainWindow(QMainWindow):
             ("notes", "Annotations & Edits", 2),
         ]:
             btn = QPushButton()
+            btn.setObjectName("RailBtn")
+            btn.setCheckable(True)
             btn.setFixedSize(32, 32)
             btn.setToolTip(tip)
             btn.clicked.connect(lambda _=False, ti=tab_idx: self._toggle_sidebar_tab(ti))
             self._right_rail_buttons.append((btn, icon_name))
+            self._right_rail_tab_buttons[tab_idx] = (btn, icon_name)
             v.addWidget(btn)
 
         v.addStretch()
 
         btn_theme = QPushButton()
+        btn_theme.setObjectName("RailBtn")
         btn_theme.setFixedSize(32, 32)
         btn_theme.setToolTip("Toggle Light / Dark Theme")
         btn_theme.clicked.connect(self.toggle_theme)
@@ -461,16 +499,30 @@ class MainWindow(QMainWindow):
         v.addWidget(btn_theme)
         return rail
 
+    def _sync_right_rail_buttons(self) -> None:
+        is_open = self.sidebar.isVisible()
+        cur_idx = self.sidebar.tabs.currentIndex()
+        base_col = "#e2e8f0" if self.dark_theme else "#334155"
+        for ti, (btn, icon_name) in self._right_rail_tab_buttons.items():
+            active = is_open and ti == cur_idx
+            btn.blockSignals(True)
+            btn.setChecked(active)
+            btn.blockSignals(False)
+            btn.setIcon(make_icon(icon_name, "#ffffff" if active else base_col, 17))
+            btn.setIconSize(QSize(17, 17))
+
     def _toggle_sidebar_tab(self, tab_idx: int) -> None:
         if self.sidebar.isVisible() and self.sidebar.tabs.currentIndex() == tab_idx:
             self.sidebar.hide()
         else:
             self.sidebar.tabs.setCurrentIndex(tab_idx)
             self.sidebar.show()
+        self._sync_right_rail_buttons()
+        if self.centralWidget() and self.centralWidget().layout():
+            self.centralWidget().layout().activate()
         tab = self.current_tab()
         if tab and tab.zoom_mode in ("Fit Width", "Fit Page"):
-            QApplication.processEvents()
-            tab.refresh_all_pages()
+            tab.refresh_all_pages(defer_render=False)
             self._position_floating_bar()
 
     def _build_welcome_widget(self) -> QWidget:
@@ -535,23 +587,30 @@ class MainWindow(QMainWindow):
         self.ribbon.search_input.setFocus()
         self.ribbon.search_input.selectAll()
 
+    def _focused_text_input(self):
+        """Return the focused text/line editor inside the window when visible."""
+        fw = QApplication.focusWidget() or self.focusWidget()
+        if isinstance(fw, (QTextEdit, QLineEdit)) and fw.isVisible():
+            return fw
+        return None
+
     def _shortcut_undo(self) -> None:
-        fw = QApplication.focusWidget()
-        if isinstance(fw, (QTextEdit, QLineEdit)):
+        fw = self._focused_text_input()
+        if fw is not None:
             fw.undo()
             return
         self.undo()
 
     def _shortcut_redo(self) -> None:
-        fw = QApplication.focusWidget()
-        if isinstance(fw, (QTextEdit, QLineEdit)):
+        fw = self._focused_text_input()
+        if fw is not None:
             fw.redo()
             return
         self.redo()
 
     def _shortcut_copy(self) -> None:
-        fw = QApplication.focusWidget()
-        if isinstance(fw, (QTextEdit, QLineEdit)):
+        fw = self._focused_text_input()
+        if fw is not None:
             fw.copy()
             return
         tab = self.current_tab()
@@ -570,6 +629,7 @@ class MainWindow(QMainWindow):
         for btn, icon_name in self._right_rail_buttons:
             btn.setIcon(make_icon(icon_name, col, 17))
             btn.setIconSize(QSize(17, 17))
+        self._sync_right_rail_buttons()
 
     def set_mode(self, mode: str) -> None:
         self.left_rail.set_active_mode(mode)
@@ -812,6 +872,7 @@ class MainWindow(QMainWindow):
     def _on_scroll(self, tab: DocumentTab) -> None:
         if tab is not self.current_tab() or not tab.page_widgets:
             return
+        tab.refresh_visible_pages(buffer_px=250)
         if self._get_active_editor() is not None:
             self._position_floating_bar()
         if tab._programmatic_scroll:
@@ -1677,11 +1738,18 @@ class MainWindow(QMainWindow):
                     return
         super().closeEvent(event)
 
+    def _flush_deferred_fit_render(self) -> None:
+        tab = self.current_tab()
+        if tab and tab.page_widgets:
+            tab.refresh_visible_pages(buffer_px=200)
+            self._position_floating_bar()
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         tab = self.current_tab()
         if tab and tab.zoom_mode in ("Fit Width", "Fit Page"):
-            tab.refresh_all_pages()
+            tab.refresh_all_pages(defer_render=True)
+            self._resize_fit_timer.start()
         self._position_floating_bar()
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
