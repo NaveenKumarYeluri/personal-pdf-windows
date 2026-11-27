@@ -872,3 +872,54 @@ def test_interactive_forms_and_pdf_links(qtbot):
     win.undo()
     assert tab.engine.form_values == {}
     assert tab.dirty is False
+
+
+def test_annotate_tool_isolation_width_and_search_shortcuts(qtbot, monkeypatch):
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QColorDialog, QComboBox
+
+    doc = pymupdf.open()
+    doc.new_page(width=500, height=600)
+    doc.new_page(width=500, height=600)
+    doc[0].insert_text((40, 40), "Page one alpha match", fontsize=12)
+    doc[1].insert_text((40, 40), "Page two alpha match", fontsize=12)
+    pdf_bytes = doc.tobytes()
+    doc.close()
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+    tab = win.open_pdf_bytes(pdf_bytes, "search_annotate.pdf")
+
+    # 1. Search Enter / Shift+Enter navigation and Escape clear
+    win.ribbon.search_input.setText("alpha")
+    assert win.ribbon.lbl_search_count.text() == "1/2"
+    QTest.keyClick(win.ribbon.search_input, Qt.Key_Return)
+    assert win.ribbon.lbl_search_count.text() == "2/2"
+    assert tab.current_page == 1
+    QTest.keyClick(win.ribbon.search_input, Qt.Key_Return, Qt.ShiftModifier)
+    assert win.ribbon.lbl_search_count.text() == "1/2"
+    assert tab.current_page == 0
+    QTest.keyClick(win.ribbon.search_input, Qt.Key_Escape)
+    assert win.ribbon.search_input.text() == ""
+    assert win.ribbon.lbl_search_count.text() == "0/0"
+
+    # 2. Annotate mode: Pen color/width isolated from Highlighter color/width
+    win.set_mode("annotate")
+    monkeypatch.setattr(QColorDialog, "getColor", lambda *a, **kw: QColor("#1d4ed8"))
+    win._on_tool_action("pick_color", {})
+    combos = win.ribbon.context_bar.findChildren(QComboBox)
+    assert len(combos) == 2
+    width_cb = combos[1]
+    width_cb.setCurrentIndex(width_cb.findText("5 pt"))
+    assert win.tool_state["color"] == "#1d4ed8"
+    assert win.tool_state["width"] == 5.0
+
+    # Switch to Highlighter (yellow, 14pt, 0.35), then back to Rect -> restores #1d4ed8, 5pt, 1.0
+    win._on_tool_action("tool:highlighter", {})
+    assert win.tool_state["color"] == "#eab308"
+    assert win.tool_state["width"] == 14.0
+    win._on_tool_action("tool:rect", {})
+    assert win.tool_state["color"] == "#1d4ed8"
+    assert win.tool_state["width"] == 5.0
+    assert win.tool_state["opacity"] == 1.0

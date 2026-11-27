@@ -267,10 +267,15 @@ class MainWindow(QMainWindow):
         self.accent_color = "#ea2e3f"
         self.accent_hover = "#d22333"
 
+        self._ink_color = "#ef4444"
+        self._ink_width = 3.0
+        self._hl_color = "#eab308"
+        self._hl_width = 14.0
+        self._hl_opacity = 0.35
         self.tool_state = {
             "tool": "select",
-            "color": "#ef4444",
-            "width": 3.0,
+            "color": self._ink_color,
+            "width": self._ink_width,
             "opacity": 1.0,
             "font_family": "Calibri",
             "font_size": 12,
@@ -379,6 +384,8 @@ class MainWindow(QMainWindow):
         self.ribbon.searchChanged.connect(self.run_search)
         self.ribbon.searchPrevClicked.connect(lambda: self.step_search(-1))
         self.ribbon.searchNextClicked.connect(lambda: self.step_search(1))
+        self.ribbon.searchReturnPressed.connect(lambda back: self.step_search(-1 if back else 1))
+        self.ribbon.searchCleared.connect(self._clear_search)
         self.ribbon.modeChanged.connect(self._on_mode_changed)
         self.ribbon.toolAction.connect(self._on_tool_action)
 
@@ -474,14 +481,21 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Shift+S"), self, activated=self.save_as_current_pdf)
         QShortcut(QKeySequence("Ctrl+P"), self, activated=self.print_current_pdf)
         QShortcut(QKeySequence("Ctrl+W"), self, activated=lambda: self._request_close_tab(self.tabs.currentIndex()))
-        QShortcut(QKeySequence("Ctrl+F"), self, activated=lambda: self.ribbon.search_input.setFocus())
+        QShortcut(QKeySequence("Ctrl+F"), self, activated=self._focus_search)
+        QShortcut(QKeySequence("F3"), self, activated=lambda: self.step_search(1))
+        QShortcut(QKeySequence("Shift+F3"), self, activated=lambda: self.step_search(-1))
         QShortcut(QKeySequence("Ctrl+C"), self, activated=self._shortcut_copy)
         QShortcut(QKeySequence("Ctrl+Z"), self, activated=self._shortcut_undo)
         QShortcut(QKeySequence("Ctrl+Y"), self, activated=self._shortcut_redo)
+        QShortcut(QKeySequence("Ctrl+Shift+Z"), self, activated=self._shortcut_redo)
         QShortcut(QKeySequence("Ctrl+="), self, activated=lambda: self.step_zoom(1.15))
         QShortcut(QKeySequence("Ctrl+-"), self, activated=lambda: self.step_zoom(0.85))
         QShortcut(QKeySequence("Ctrl+0"), self, activated=lambda: self.set_zoom_mode("Fit Width"))
         QShortcut(QKeySequence("Ctrl+1"), self, activated=lambda: self.set_zoom_mode("100%"))
+
+    def _focus_search(self) -> None:
+        self.ribbon.search_input.setFocus()
+        self.ribbon.search_input.selectAll()
 
     def _shortcut_undo(self) -> None:
         fw = QApplication.focusWidget()
@@ -1115,12 +1129,14 @@ class MainWindow(QMainWindow):
         self.tool_state["tool"] = tool
         self.left_rail.btn_pan.setChecked(tool == "pan")
         if tool == "highlighter":
-            self.tool_state["color"] = "#eab308"
-            self.tool_state["width"] = 14.0
-            self.tool_state["opacity"] = 0.35
-        elif tool == "pen":
-            self.tool_state["width"] = 3.0
+            self.tool_state["color"] = self._hl_color
+            self.tool_state["width"] = self._hl_width
+            self.tool_state["opacity"] = self._hl_opacity
+        else:
+            self.tool_state["color"] = self._ink_color
+            self.tool_state["width"] = self._ink_width
             self.tool_state["opacity"] = 1.0
+        self.ribbon.set_width_indicator(self.tool_state["width"])
         if tab:
             for pw in tab.page_widgets:
                 pw.set_tool_state(**self.tool_state)
@@ -1129,6 +1145,17 @@ class MainWindow(QMainWindow):
         tab = self.current_tab()
         if action.startswith("tool:"):
             self._set_active_tool(action.split(":", 1)[1])
+            return
+        if action == "set_width":
+            w_val = float(extra.get("width", 3.0))
+            if self.tool_state["tool"] == "highlighter":
+                self._hl_width = w_val
+            else:
+                self._ink_width = w_val
+            self.tool_state["width"] = w_val
+            if tab:
+                for pw in tab.page_widgets:
+                    pw.set_tool_state(**self.tool_state)
             return
         if tab is None:
             QMessageBox.information(self, "Personal PDF Suite", "Please open a PDF document first.")
@@ -1151,6 +1178,10 @@ class MainWindow(QMainWindow):
 
             col = QColorDialog.getColor(QColor(self.tool_state["color"]), self, "Pick Tool Color")
             if col.isValid():
+                if self.tool_state["tool"] == "highlighter":
+                    self._hl_color = col.name()
+                else:
+                    self._ink_color = col.name()
                 self.tool_state["color"] = col.name()
                 for pw in tab.page_widgets:
                     pw.set_tool_state(**self.tool_state)
@@ -1583,6 +1614,15 @@ class MainWindow(QMainWindow):
         tab._apply_search_highlights()
         self._update_search_label(tab)
         self.go_to_page(tab.search_hits[tab.search_idx].page_idx)
+
+    def _clear_search(self) -> None:
+        tab = self.current_tab()
+        if not tab:
+            return
+        tab.search_hits = []
+        tab.search_idx = -1
+        tab._apply_search_highlights()
+        self._update_search_label(tab)
 
     def _update_search_label(self, tab: DocumentTab) -> None:
         total = len(tab.search_hits)

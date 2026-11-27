@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QSize, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup, QIntValidator
 from PySide6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QComboBox,
     QFrame,
@@ -53,6 +54,8 @@ class RibbonHeader(QWidget):
     searchChanged = Signal(str)
     searchPrevClicked = Signal()
     searchNextClicked = Signal()
+    searchReturnPressed = Signal(bool)
+    searchCleared = Signal()
     modeChanged = Signal(str)
     toolAction = Signal(str, dict)
 
@@ -61,6 +64,8 @@ class RibbonHeader(QWidget):
         self._icon_color = "#334155"
         self.current_mode = "view"
         self._tool_buttons: list[tuple[QPushButton, str]] = []
+        self._width_combo: QComboBox | None = None
+        self._active_width_pt: float = 3.0
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -148,8 +153,10 @@ class RibbonHeader(QWidget):
         self.search_input = QLineEdit()
         self.search_input.setObjectName("SearchInput")
         self.search_input.setPlaceholderText("Find (Ctrl+F)...")
-        self.search_input.setFixedSize(135, 26)
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.setFixedSize(145, 26)
         self.search_input.textChanged.connect(self.searchChanged.emit)
+        self.search_input.installEventFilter(self)
         self.lbl_search_count = QLabel("0/0")
         self.lbl_search_count.setStyleSheet("font-size:11px; padding:0 2px;")
         self.btn_search_prev = self._icon_btn("up", "Previous Match", self.searchPrevClicked.emit, size=13)
@@ -271,7 +278,48 @@ class RibbonHeader(QWidget):
         self.btn_prev.setEnabled(total > 0 and current_zero > 0)
         self.btn_next.setEnabled(total > 0 and current_zero < total - 1)
 
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if watched is self.search_input and event.type() == QEvent.KeyPress:
+            key = event.key()
+            if key in (Qt.Key_Return, Qt.Key_Enter):
+                backwards = bool(event.modifiers() & Qt.ShiftModifier)
+                self.searchReturnPressed.emit(backwards)
+                return True
+            if key == Qt.Key_Escape:
+                self.search_input.clear()
+                self.search_input.clearFocus()
+                self.searchCleared.emit()
+                return True
+        return super().eventFilter(watched, event)
+
+    def set_width_indicator(self, width_pt: float) -> None:
+        self._active_width_pt = float(width_pt)
+        cb = self._width_combo
+        if cb is None:
+            return
+        try:
+            cb.blockSignals(True)
+            best_idx = 0
+            best_diff = float("inf")
+            for i in range(cb.count()):
+                val = cb.itemData(i)
+                if isinstance(val, (int, float)):
+                    d = abs(float(val) - self._active_width_pt)
+                    if d < best_diff:
+                        best_diff = d
+                        best_idx = i
+            cb.setCurrentIndex(best_idx)
+        except RuntimeError:
+            self._width_combo = None
+        finally:
+            if self._width_combo is not None:
+                try:
+                    cb.blockSignals(False)
+                except RuntimeError:
+                    self._width_combo = None
+
     def _clear_dynamic_tools(self) -> None:
+        self._width_combo = None
         while self.dynamic_layout.count():
             item = self.dynamic_layout.takeAt(0)
             w = item.widget()
@@ -354,6 +402,19 @@ class RibbonHeader(QWidget):
 
             stamp_combo.currentTextChanged.connect(_on_stamp_picked)
             self.dynamic_layout.addWidget(stamp_combo)
+
+            width_combo = QComboBox()
+            for lbl, pt_val in [("1 pt", 1.0), ("2 pt", 2.0), ("3 pt", 3.0), ("5 pt", 5.0), ("8 pt", 8.0), ("14 pt", 14.0)]:
+                width_combo.addItem(lbl, pt_val)
+            width_combo.setToolTip("Stroke / Highlighter Thickness")
+            width_combo.currentIndexChanged.connect(
+                lambda idx, cb=width_combo: self.toolAction.emit(
+                    "set_width", {"width": float(cb.itemData(idx) or 3.0)}
+                )
+            )
+            self._width_combo = width_combo
+            self.set_width_indicator(self._active_width_pt)
+            self.dynamic_layout.addWidget(width_combo)
 
         elif mode == "organize":
             self._add_tool_btn("Visual Page Grid", "open_organizer")
