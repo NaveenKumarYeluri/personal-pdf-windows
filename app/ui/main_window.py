@@ -189,6 +189,7 @@ class DocumentTab(QScrollArea):
             pw.formFieldEdited.connect(callbacks["form_edited"])
             pw.pageInteracted.connect(callbacks["page_interacted"])
             self.pages_layout.addWidget(pw)
+            pw.show()
             self.page_widgets.append(pw)
 
         self._apply_search_highlights()
@@ -205,29 +206,65 @@ class DocumentTab(QScrollArea):
             by_page.setdefault(hit.page_idx, []).append((g_idx, hit))
         for pw in self.page_widgets:
             items = by_page.get(pw.page_idx, [])
-            pw.search_hits = [it[1] for it in items]
-            pw.active_hit_idx = next(
+            new_hits = [it[1] for it in items]
+            new_active = next(
                 (local_i for local_i, (g_i, _) in enumerate(items) if g_i == self.search_idx), -1
             )
-            pw.update()
+            if pw.search_hits != new_hits or pw.active_hit_idx != new_active:
+                pw.search_hits = new_hits
+                pw.active_hit_idx = new_active
+                pw.update()
+
+    def _ensure_scroll_layout(self) -> None:
+        for pw in self.page_widgets:
+            if pw.isHidden():
+                pw.show()
+        self.pages_layout.activate()
+        hint = self.pages_layout.sizeHint()
+        vw = max(1, self.viewport().width())
+        vh = max(1, self.viewport().height())
+        target_w = max(vw, hint.width())
+        target_h = max(vh, hint.height())
+        if self.pages_container.width() != target_w or self.pages_container.height() != target_h:
+            self.pages_container.resize(target_w, target_h)
+        vbar = self.verticalScrollBar()
+        if target_h > vh and vbar.maximum() < (target_h - vh):
+            vbar.setRange(0, target_h - vh)
+        hbar = self.horizontalScrollBar()
+        if target_w > vw and hbar.maximum() < (target_w - vw):
+            hbar.setRange(0, target_w - vw)
 
     def scroll_to_page(self, page_idx: int) -> None:
         if not (0 <= page_idx < len(self.page_widgets)):
             return
-        for _ in range(6):
-            ready = self.page_widgets[page_idx].isVisible() and (
-                page_idx == 0 or self.page_widgets[page_idx].y() > self.page_widgets[page_idx - 1].y()
-            )
-            if ready and (self.pages_layout.sizeHint().height() <= self.viewport().height() or self.verticalScrollBar().maximum() > 0):
-                break
-            QApplication.processEvents()
-        self.pages_layout.activate()
+        self._ensure_scroll_layout()
         pw = self.page_widgets[page_idx]
         target_y = max(0, pw.y() - 12)
         self._programmatic_scroll = True
         try:
             self.current_page = page_idx
             self.verticalScrollBar().setValue(target_y)
+        finally:
+            self._programmatic_scroll = False
+
+    def scroll_to_rect(self, page_idx: int, rect: tuple[float, float, float, float]) -> None:
+        if not (0 <= page_idx < len(self.page_widgets)):
+            return
+        self._ensure_scroll_layout()
+        pw = self.page_widgets[page_idx]
+        hit_qrect = pw._pdf_rect_to_display_qrect(rect)
+        vp_h = max(100, self.viewport().height())
+        vp_w = max(100, self.viewport().width())
+        vbar = self.verticalScrollBar()
+        hbar = self.horizontalScrollBar()
+        target_y = max(0, min(vbar.maximum(), pw.y() + hit_qrect.center().y() - vp_h // 2))
+        target_x = max(0, min(hbar.maximum(), pw.x() + hit_qrect.center().x() - vp_w // 2))
+        self._programmatic_scroll = True
+        try:
+            self.current_page = page_idx
+            vbar.setValue(target_y)
+            if hbar.maximum() > 0:
+                hbar.setValue(target_x)
         finally:
             self._programmatic_scroll = False
 
@@ -1595,6 +1632,11 @@ class MainWindow(QMainWindow):
         tab.rotation = (tab.rotation + 90) % 360
         tab.refresh_all_pages()
 
+    def _scroll_to_search_hit(self, tab: DocumentTab, hit: SearchHit) -> None:
+        tab.scroll_to_rect(hit.page_idx, hit.rect)
+        self.ribbon.update_page_info(hit.page_idx, tab.engine.page_count)
+        self.sidebar.set_current_page(hit.page_idx)
+
     def run_search(self, query: str) -> None:
         tab = self.current_tab()
         if not tab:
@@ -1604,7 +1646,7 @@ class MainWindow(QMainWindow):
         tab._apply_search_highlights()
         self._update_search_label(tab)
         if tab.search_hits:
-            self.go_to_page(tab.search_hits[0].page_idx)
+            self._scroll_to_search_hit(tab, tab.search_hits[0])
 
     def step_search(self, delta: int) -> None:
         tab = self.current_tab()
@@ -1613,7 +1655,7 @@ class MainWindow(QMainWindow):
         tab.search_idx = (tab.search_idx + delta) % len(tab.search_hits)
         tab._apply_search_highlights()
         self._update_search_label(tab)
-        self.go_to_page(tab.search_hits[tab.search_idx].page_idx)
+        self._scroll_to_search_hit(tab, tab.search_hits[tab.search_idx])
 
     def _clear_search(self) -> None:
         tab = self.current_tab()

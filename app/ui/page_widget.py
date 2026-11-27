@@ -1089,11 +1089,15 @@ class PDFPageWidget(QWidget):
             painter.translate(0, self.height())
             painter.rotate(270)
 
-        # 1. Search highlights
+        # 1. Search highlights (only paint rects intersecting exposed region)
+        clip_rect = QRectF(event.rect()) if event is not None else QRectF(self.rect())
         for idx, hit in enumerate(self.search_hits):
+            wr = self._to_widget_rect(hit.rect)
+            if rot == 0 and not wr.intersects(clip_rect):
+                continue
             col = QColor("#f97316") if idx == self.active_hit_idx else QColor("#facc15")
             col.setAlphaF(0.45)
-            painter.fillRect(self._to_widget_rect(hit.rect), col)
+            painter.fillRect(wr, col)
 
         # 2. Text selection highlight
         for qr in self._selected_quads:

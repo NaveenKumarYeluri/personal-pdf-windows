@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QObject, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QIntValidator
 from PySide6.QtWidgets import (
     QApplication,
@@ -66,6 +66,11 @@ class RibbonHeader(QWidget):
         self._tool_buttons: list[tuple[QPushButton, str]] = []
         self._width_combo: QComboBox | None = None
         self._active_width_pt: float = 3.0
+        self._typing_search = False
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(160)
+        self._search_timer.timeout.connect(self._emit_debounced_search)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -155,12 +160,13 @@ class RibbonHeader(QWidget):
         self.search_input.setPlaceholderText("Find (Ctrl+F)...")
         self.search_input.setClearButtonEnabled(True)
         self.search_input.setFixedSize(145, 26)
-        self.search_input.textChanged.connect(self.searchChanged.emit)
+        self.search_input.textEdited.connect(self._on_search_text_edited)
+        self.search_input.textChanged.connect(self._on_search_text_changed)
         self.search_input.installEventFilter(self)
         self.lbl_search_count = QLabel("0/0")
         self.lbl_search_count.setStyleSheet("font-size:11px; padding:0 2px;")
-        self.btn_search_prev = self._icon_btn("up", "Previous Match", self.searchPrevClicked.emit, size=13)
-        self.btn_search_next = self._icon_btn("down", "Next Match", self.searchNextClicked.emit, size=13)
+        self.btn_search_prev = self._icon_btn("up", "Previous Match", self._on_search_prev_clicked, size=13)
+        self.btn_search_next = self._icon_btn("down", "Next Match", self._on_search_next_clicked, size=13)
         for w in (self.search_input, self.lbl_search_count, self.btn_search_prev, self.btn_search_next):
             tb.addWidget(w)
 
@@ -278,14 +284,46 @@ class RibbonHeader(QWidget):
         self.btn_prev.setEnabled(total > 0 and current_zero > 0)
         self.btn_next.setEnabled(total > 0 and current_zero < total - 1)
 
+    def _on_search_text_edited(self, _text: str) -> None:
+        self._typing_search = True
+        self._search_timer.start()
+
+    def _on_search_text_changed(self, text: str) -> None:
+        if self._typing_search:
+            self._typing_search = False
+            return
+        self._search_timer.stop()
+        self.searchChanged.emit(text)
+
+    def _emit_debounced_search(self) -> None:
+        self.searchChanged.emit(self.search_input.text())
+
+    def flush_pending_search(self) -> bool:
+        if self._search_timer.isActive():
+            self._search_timer.stop()
+            self.searchChanged.emit(self.search_input.text())
+            return True
+        return False
+
+    def _on_search_prev_clicked(self) -> None:
+        if not self.flush_pending_search():
+            self.searchPrevClicked.emit()
+
+    def _on_search_next_clicked(self) -> None:
+        if not self.flush_pending_search():
+            self.searchNextClicked.emit()
+
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if watched is self.search_input and event.type() == QEvent.KeyPress:
             key = event.key()
             if key in (Qt.Key_Return, Qt.Key_Enter):
-                backwards = bool(event.modifiers() & Qt.ShiftModifier)
-                self.searchReturnPressed.emit(backwards)
+                if not self.flush_pending_search():
+                    backwards = bool(event.modifiers() & Qt.ShiftModifier)
+                    self.searchReturnPressed.emit(backwards)
                 return True
             if key == Qt.Key_Escape:
+                self._search_timer.stop()
+                self._typing_search = False
                 self.search_input.clear()
                 self.search_input.clearFocus()
                 self.searchCleared.emit()

@@ -891,7 +891,7 @@ def test_annotate_tool_isolation_width_and_search_shortcuts(qtbot, monkeypatch):
     win.show()
     tab = win.open_pdf_bytes(pdf_bytes, "search_annotate.pdf")
 
-    # 1. Search Enter / Shift+Enter navigation and Escape clear
+    # 1. Search Enter / Shift+Enter navigation, deep-paragraph scroll, typing debounce, and Escape clear
     win.ribbon.search_input.setText("alpha")
     assert win.ribbon.lbl_search_count.text() == "1/2"
     QTest.keyClick(win.ribbon.search_input, Qt.Key_Return)
@@ -903,6 +903,26 @@ def test_annotate_tool_isolation_width_and_search_shortcuts(qtbot, monkeypatch):
     QTest.keyClick(win.ribbon.search_input, Qt.Key_Escape)
     assert win.ribbon.search_input.text() == ""
     assert win.ribbon.lbl_search_count.text() == "0/0"
+
+    # Verify search scrolls down within a page past the 1st paragraph to lower matches
+    sql_tab = win.open_pdf_path(str(SQL_PDF))
+    assert sql_tab is not None
+    win.ribbon.search_input.clear()
+    win.ribbon.search_input.setFocus()
+    QTest.keyClicks(win.ribbon.search_input, "Heap")
+    QTest.keyClick(win.ribbon.search_input, Qt.Key_Return)  # flushes debounced typing search
+    assert len(sql_tab.search_hits) > 2
+    assert win.ribbon.lbl_search_count.text().startswith("1/")
+    scroll_first = sql_tab.verticalScrollBar().value()
+    # Step forward to a lower match on page 0 (beyond 1st para)
+    p0_hits = [h for h in sql_tab.search_hits if h.page_idx == 0]
+    assert len(p0_hits) >= 2 and p0_hits[-1].rect[1] > p0_hits[0].rect[1] + 200
+    for _ in range(len(p0_hits) - 1):
+        win.step_search(1)
+    assert sql_tab.verticalScrollBar().value() > scroll_first + 100
+    # Step once more into page 1
+    win.step_search(1)
+    assert sql_tab.current_page == 1
 
     # 2. Annotate mode: Pen color/width isolated from Highlighter color/width
     win.set_mode("annotate")
