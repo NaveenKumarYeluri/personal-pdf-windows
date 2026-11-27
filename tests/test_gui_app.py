@@ -943,3 +943,33 @@ def test_annotate_tool_isolation_width_and_search_shortcuts(qtbot, monkeypatch):
     assert win.tool_state["color"] == "#1d4ed8"
     assert win.tool_state["width"] == 5.0
     assert win.tool_state["opacity"] == 1.0
+
+
+def test_pdf_print_dialog_preview_ranges_and_pdf_output(qtbot, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+    from app.core.pdf_engine import create_sample_pdf_bytes
+    from app.ui.dialogs import PdfPrintDialog
+
+    sample = create_sample_pdf_bytes()
+    dlg = PdfPrintDialog(sample, current_page_zero=1, doc_name="sample.pdf")
+    qtbot.addWidget(dlg)
+    dlg.show()
+    qtbot.wait(20)
+    assert dlg.preview.pageCount() == 2
+
+    dlg.rb_custom.setChecked(True)
+    dlg.range_input.setText("2")
+    assert dlg.selected_page_indices() == [1]
+
+    out_pdf = tmp_path / "printed_out.pdf"
+    dlg.printer_combo.setCurrentText(PdfPrintDialog.PDF_FILE_OPTION)
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **kw: (str(out_pdf), "PDF Files (*.pdf)"))
+    dlg.btn_print.click()
+    assert dlg.result() == PdfPrintDialog.Accepted
+    dlg.render_to_printer(dlg.printer)
+    dlg.close_doc()
+
+    assert out_pdf.exists()
+    printed = pymupdf.open(str(out_pdf))
+    assert len(printed) == 1
+    printed.close()

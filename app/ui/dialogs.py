@@ -3,8 +3,22 @@
 from __future__ import annotations
 
 import io
+import sys
+import pymupdf
 from PySide6.QtCore import QPoint, QSize, Qt
-from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap, QTransform
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QIcon,
+    QImage,
+    QPageLayout,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QTransform,
+)
+from PySide6.QtPrintSupport import QPrintDialog, QPrintPreviewWidget, QPrinter, QPrinterInfo
 from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
@@ -13,6 +27,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -20,6 +35,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QSlider,
     QSpinBox,
     QTabWidget,
@@ -721,3 +737,292 @@ class WordFlowDialog(QDialog):
 
     def get_html(self) -> str:
         return self.editor.toHtml()
+
+
+class PdfPrintDialog(QDialog):
+    """Native Qt Print Preview & Print Dialog bypassing Windows 11 legacy PrintDlgEx limitations."""
+
+    PDF_FILE_OPTION = "Save as PDF File..."
+
+    def __init__(
+        self,
+        pdf_bytes: bytes,
+        current_page_zero: int = 0,
+        doc_name: str = "document.pdf",
+        parent: QWidget | None = None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Print Document")
+        self.resize(920, 640)
+        self._doc: pymupdf.Document | None = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+        self._total_pages = len(self._doc)
+        self._current_page_zero = max(0, min(current_page_zero, max(0, self._total_pages - 1)))
+        self._doc_name = doc_name
+        self.used_system_dialog = False
+
+        if sys.platform == "win32":
+            try:
+                import ctypes
+
+                ctypes.windll.ole32.OleInitialize(None)
+            except Exception:
+                pass
+
+        self.printer = QPrinter(QPrinter.HighResolution)
+        default_name = QPrinterInfo.defaultPrinterName()
+        if default_name:
+            self.printer.setPrinterName(default_name)
+
+        root = QHBoxLayout(self)
+
+        # Left: Live Print Preview
+        prev_col = QVBoxLayout()
+        pbar = QHBoxLayout()
+        self.btn_prev_p = QPushButton("◀ Prev")
+        self.btn_next_p = QPushButton("Next ▶")
+        self.lbl_prev_page = QLabel("Preview")
+        self.btn_z_out = QPushButton("−")
+        self.btn_z_fit = QPushButton("Fit")
+        self.btn_z_in = QPushButton("+")
+        for b in (self.btn_prev_p, self.btn_next_p, self.btn_z_out, self.btn_z_fit, self.btn_z_in):
+            b.setObjectName("PillBtn")
+        pbar.addWidget(self.btn_prev_p)
+        pbar.addWidget(self.btn_next_p)
+        pbar.addWidget(self.lbl_prev_page)
+        pbar.addStretch()
+        pbar.addWidget(self.btn_z_out)
+        pbar.addWidget(self.btn_z_fit)
+        pbar.addWidget(self.btn_z_in)
+        prev_col.addLayout(pbar)
+
+        self.preview = QPrintPreviewWidget(self.printer, self)
+        self.preview.paintRequested.connect(self._on_preview_paint)
+        prev_col.addWidget(self.preview, stretch=1)
+        root.addLayout(prev_col, stretch=1)
+
+        self.btn_prev_p.clicked.connect(lambda: self._step_preview_page(-1))
+        self.btn_next_p.clicked.connect(lambda: self._step_preview_page(1))
+        self.btn_z_out.clicked.connect(lambda: self.preview.zoomOut(1.2))
+        self.btn_z_in.clicked.connect(lambda: self.preview.zoomIn(1.2))
+        self.btn_z_fit.clicked.connect(self.preview.fitInView)
+
+        # Right: Print Settings
+        ctrl_wrap = QWidget()
+        ctrl_wrap.setFixedWidth(290)
+        cv = QVBoxLayout(ctrl_wrap)
+
+        grp_printer = QGroupBox("Printer")
+        fp = QFormLayout(grp_printer)
+        self.printer_combo = QComboBox()
+        names = [p.printerName() for p in QPrinterInfo.availablePrinters() if p.printerName()]
+        for n in names:
+            self.printer_combo.addItem(n)
+        self.printer_combo.addItem(self.PDF_FILE_OPTION)
+        if default_name and default_name in names:
+            self.printer_combo.setCurrentText(default_name)
+        fp.addRow("Destination:", self.printer_combo)
+        self.copies_spin = QSpinBox()
+        self.copies_spin.setRange(1, 99)
+        self.copies_spin.setValue(1)
+        fp.addRow("Copies:", self.copies_spin)
+        cv.addWidget(grp_printer)
+
+        grp_pages = QGroupBox("Pages")
+        vp = QVBoxLayout(grp_pages)
+        self.rb_all = QRadioButton(f"All Pages (1–{self._total_pages})")
+        self.rb_current = QRadioButton(f"Current Page ({self._current_page_zero + 1})")
+        self.rb_custom = QRadioButton("Custom Range:")
+        self.rb_all.setChecked(True)
+        self.range_input = QLineEdit(f"1-{self._total_pages}" if self._total_pages > 1 else "1")
+        self.range_input.setPlaceholderText("e.g. 1-3, 5")
+        self.range_input.setEnabled(False)
+        self.rb_custom.toggled.connect(self.range_input.setEnabled)
+        for rb in (self.rb_all, self.rb_current, self.rb_custom):
+            rb.toggled.connect(self._refresh_preview)
+            vp.addWidget(rb)
+        self.range_input.textChanged.connect(self._refresh_preview)
+        vp.addWidget(self.range_input)
+        cv.addWidget(grp_pages)
+
+        grp_layout = QGroupBox("Layout")
+        fl = QFormLayout(grp_layout)
+        self.orient_combo = QComboBox()
+        self.orient_combo.addItems(["Auto (Match Page)", "Portrait", "Landscape"])
+        self.orient_combo.currentIndexChanged.connect(self._refresh_preview)
+        self.fit_check = QCheckBox("Fit to printable page")
+        self.fit_check.setChecked(True)
+        self.fit_check.toggled.connect(self._refresh_preview)
+        fl.addRow("Orientation:", self.orient_combo)
+        fl.addRow(self.fit_check)
+        cv.addWidget(grp_layout)
+
+        cv.addStretch()
+
+        self.btn_print = QPushButton("Print")
+        self.btn_print.setObjectName("PrimaryBtn")
+        self.btn_print.setMinimumHeight(34)
+        self.btn_print.clicked.connect(self._on_print_clicked)
+        self.btn_sys = QPushButton("System Print Dialog...")
+        self.btn_sys.setObjectName("PillBtn")
+        self.btn_sys.clicked.connect(self._on_system_dialog)
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.clicked.connect(self.reject)
+        cv.addWidget(self.btn_print)
+        cv.addWidget(self.btn_sys)
+        cv.addWidget(self.btn_cancel)
+        root.addWidget(ctrl_wrap)
+
+        self._update_preview_label()
+
+    def _step_preview_page(self, delta: int) -> None:
+        cnt = max(1, self.preview.pageCount())
+        nxt = max(1, min(cnt, self.preview.currentPage() + delta))
+        self.preview.setCurrentPage(nxt)
+        self._update_preview_label()
+
+    def _update_preview_label(self) -> None:
+        self.lbl_prev_page.setText(f"Page {self.preview.currentPage()} / {max(1, self.preview.pageCount())}")
+
+    def _refresh_preview(self, *_args) -> None:
+        self._apply_orientation_to_printer(self.printer, self._safe_page_indices()[0])
+        self.preview.updatePreview()
+        self._update_preview_label()
+
+    def _safe_page_indices(self) -> list[int]:
+        if self._total_pages <= 0:
+            return []
+        if self.rb_current.isChecked():
+            return [self._current_page_zero]
+        if self.rb_custom.isChecked():
+            try:
+                return self._resolve_custom_indices()
+            except ValueError:
+                return [self._current_page_zero]
+        return list(range(self._total_pages))
+
+    def _resolve_custom_indices(self) -> list[int]:
+        ranges = parse_page_ranges(self.range_input.text(), self._total_pages)
+        out: list[int] = []
+        for s, e in ranges:
+            out.extend(range(s - 1, e))
+        return out
+
+    def selected_page_indices(self) -> list[int]:
+        if self._total_pages <= 0:
+            return []
+        if self.rb_current.isChecked():
+            return [self._current_page_zero]
+        if self.rb_custom.isChecked():
+            return self._resolve_custom_indices()
+        return list(range(self._total_pages))
+
+    def _apply_orientation_to_printer(self, printer: QPrinter, page_idx: int) -> None:
+        mode = self.orient_combo.currentText()
+        if mode == "Landscape":
+            printer.setPageOrientation(QPageLayout.Landscape)
+        elif mode == "Portrait":
+            printer.setPageOrientation(QPageLayout.Portrait)
+        elif self._doc is not None and 0 <= page_idx < len(self._doc):
+            r = self._doc[page_idx].rect
+            printer.setPageOrientation(QPageLayout.Landscape if r.width > r.height else QPageLayout.Portrait)
+
+    def _on_preview_paint(self, printer: QPrinter) -> None:
+        if self._doc is None:
+            return
+        self.render_to_printer(printer, indices=self._safe_page_indices(), preview_dpi=120)
+
+    def render_to_printer(
+        self,
+        printer: QPrinter,
+        indices: list[int] | None = None,
+        preview_dpi: int | None = None,
+    ) -> None:
+        if self._doc is None:
+            return
+        pages = indices if indices is not None else self.selected_page_indices()
+        if not pages:
+            return
+        self._apply_orientation_to_printer(printer, pages[0])
+        painter = QPainter()
+        if not painter.begin(printer):
+            raise RuntimeError("Unable to start print job on the selected printer.")
+        try:
+            dpi = preview_dpi if preview_dpi is not None else min(300, max(150, int(printer.resolution() or 200)))
+            fit = self.fit_check.isChecked()
+            for out_i, p_idx in enumerate(pages):
+                page = self._doc[p_idx]
+                if out_i > 0:
+                    self._apply_orientation_to_printer(printer, p_idx)
+                    printer.newPage()
+                page_rect = printer.pageRect(QPrinter.DevicePixel)
+                pix = page.get_pixmap(dpi=dpi, alpha=False)
+                img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888).copy()
+                if fit:
+                    scaled = img.scaled(
+                        max(1, int(page_rect.width())),
+                        max(1, int(page_rect.height())),
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation,
+                    )
+                else:
+                    scale_factor = float(printer.resolution() or dpi) / float(dpi)
+                    scaled = img.scaled(
+                        max(1, int(round(img.width() * scale_factor))),
+                        max(1, int(round(img.height() * scale_factor))),
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation,
+                    )
+                dx = max(0, int((page_rect.width() - scaled.width()) // 2))
+                dy = max(0, int((page_rect.height() - scaled.height()) // 2))
+                painter.drawImage(dx, dy, scaled)
+        finally:
+            painter.end()
+
+    def _on_print_clicked(self) -> None:
+        try:
+            indices = self.selected_page_indices()
+        except ValueError as err:
+            QMessageBox.warning(self, "Invalid Page Range", str(err))
+            return
+        if not indices:
+            QMessageBox.warning(self, "Print Document", "No pages selected to print.")
+            return
+        dest = self.printer_combo.currentText()
+        if dest == self.PDF_FILE_OPTION:
+            base = self._doc_name[:-4] if self._doc_name.lower().endswith(".pdf") else self._doc_name
+            out_path, _ = QFileDialog.getSaveFileName(
+                self, "Save Print Output as PDF", f"{base}_printed.pdf", "PDF Files (*.pdf)"
+            )
+            if not out_path:
+                return
+            if not out_path.lower().endswith(".pdf"):
+                out_path += ".pdf"
+            self.printer.setOutputFormat(QPrinter.PdfFormat)
+            self.printer.setOutputFileName(out_path)
+        else:
+            self.printer.setOutputFormat(QPrinter.NativeFormat)
+            self.printer.setOutputFileName("")
+            self.printer.setPrinterName(dest)
+        self.printer.setCopyCount(self.copies_spin.value())
+        self.accept()
+
+    def _on_system_dialog(self) -> None:
+        try:
+            self.selected_page_indices()
+        except ValueError as err:
+            QMessageBox.warning(self, "Invalid Page Range", str(err))
+            return
+        dlg = QPrintDialog(self.printer, self)
+        if dlg.exec():
+            self.used_system_dialog = True
+            self.accept()
+
+    def close_doc(self) -> None:
+        if self._doc is not None:
+            self._doc.close()
+            self._doc = None
+
+    def done(self, result: int) -> None:
+        if result == QDialog.Rejected:
+            self.close_doc()
+        super().done(result)

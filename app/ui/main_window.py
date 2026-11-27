@@ -20,7 +20,7 @@ from PySide6.QtGui import (
     QPainter,
     QShortcut,
 )
-from PySide6.QtPrintSupport import QPrintDialog, QPrinter
+from PySide6.QtPrintSupport import QPrinter
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -68,6 +68,7 @@ from app.ui.dialogs import (
     MergeDialog,
     MetadataDialog,
     OrganizerDialog,
+    PdfPrintDialog,
     ProtectDialog,
     SignatureDialog,
     SplitDialog,
@@ -1562,30 +1563,26 @@ class MainWindow(QMainWindow):
         if not tab:
             return
         tab.commit_any_active_editor()
-        printer = QPrinter(QPrinter.HighResolution)
-        dlg = QPrintDialog(printer, self)
-        if not dlg.exec():
-            return
         final_bytes = tab.engine.build_final_pdf_bytes()
-        doc = pymupdf.open(stream=final_bytes, filetype="pdf")
-        painter = QPainter(printer)
+        dlg = PdfPrintDialog(
+            final_bytes,
+            current_page_zero=tab.current_page,
+            doc_name=tab.engine.name,
+            parent=self,
+        )
         try:
-            page_rect = printer.pageRect(QPrinter.DevicePixel)
-            for idx, page in enumerate(doc):
-                if idx > 0:
-                    printer.newPage()
-                pix = page.get_pixmap(dpi=200, alpha=False)
-                img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888).copy()
-                scaled = img.scaled(
-                    int(page_rect.width()),
-                    int(page_rect.height()),
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation,
-                )
-                painter.drawImage(0, 0, scaled)
+            if not dlg.exec():
+                return
+            dlg.render_to_printer(dlg.printer)
+            out_file = dlg.printer.outputFileName()
+            if out_file:
+                self.status_bar.showMessage(f"Printed to PDF: {out_file}")
+            else:
+                self.status_bar.showMessage(f"Sent print job to {dlg.printer.printerName() or 'printer'}")
+        except Exception as err:
+            QMessageBox.critical(self, "Print Document", f"Could not complete print job:\n{err}")
         finally:
-            painter.end()
-            doc.close()
+            dlg.close_doc()
 
     def jump_page_delta(self, delta: int) -> None:
         tab = self.current_tab()
