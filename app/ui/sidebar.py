@@ -183,6 +183,10 @@ class SidebarPanel(QFrame):
                 item = QListWidgetItem(f"⬛ {len(rbs)} redaction area(s) (p.{pno + 1})")
                 item.setData(Qt.UserRole, pno)
                 self.annot_list.addItem(item)
+        for (pno, _w_idx), val in sorted(self._engine.form_values.items()):
+            item = QListWidgetItem(f"📝 Form Field p.{pno + 1}: {str(val)[:32]}")
+            item.setData(Qt.UserRole, pno)
+            self.annot_list.addItem(item)
         if self.annot_list.count() == 0:
             self.annot_list.addItem("No edits or annotations yet")
 

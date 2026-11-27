@@ -7,7 +7,7 @@ import uuid
 
 import pymupdf
 import shiboken6
-from PySide6.QtCore import QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QContextMenuEvent,
@@ -24,7 +24,9 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QColorDialog,
+    QComboBox,
     QInputDialog,
+    QLineEdit,
     QMenu,
     QScrollArea,
     QToolTip,
@@ -66,6 +68,8 @@ class PDFPageWidget(QWidget):
     annotationModified = Signal(int, str, object, str, object, object)  # (page_idx, kind, item, prop, old_val, new_val)
     itemSelected = Signal(object, object)  # (page_widget, item)
     pageInteracted = Signal(int)
+    linkClicked = Signal(dict)
+    formFieldEdited = Signal(int, int, object, object)  # (page_idx, widget_idx, old_val, new_val)
 
     def __init__(
         self,
@@ -121,6 +125,9 @@ class PDFPageWidget(QWidget):
         self._pan_last_global: QPointF | None = None
         self._stamp_pixmap_cache: dict[tuple[str, int], QPixmap] = {}
         self._last_render_sig: tuple | None = None
+        self._hover_widget: dict | None = None
+        self._active_form_editor: QWidget | None = None
+        self._sel_dragged: bool = False
 
         self.active_editor: InPlaceTextEditor | None = None
         self.refresh_render()
@@ -164,6 +171,8 @@ class PDFPageWidget(QWidget):
         self.update()
 
     def set_view_params(self, zoom: float, rotation: int) -> None:
+        if abs(zoom - self.zoom) > 1e-4 or (rotation % 360) != (self.rotation % 360):
+            self.close_active_form_editor()
         self.zoom = zoom
         self.rotation = rotation
         self.refresh_render()
@@ -191,6 +200,9 @@ class PDFPageWidget(QWidget):
 
         if tool != "edit_text":
             self._hover_block = None
+        if tool != "select":
+            self._hover_widget = None
+            self.close_active_form_editor()
         self._panning = False
         self._pan_last_global = None
         if tool == "pan":
@@ -204,6 +216,32 @@ class PDFPageWidget(QWidget):
         else:
             self.setCursor(Qt.ArrowCursor)
         self.update()
+
+    def _to_display_pt(self, px: float, py: float) -> QPointF:
+        rot = self.rotation % 360
+        if rot == 90:
+            return QPointF((self._page_h_pt - py) * self.zoom, px * self.zoom)
+        if rot == 180:
+            return QPointF((self._page_w_pt - px) * self.zoom, (self._page_h_pt - py) * self.zoom)
+        if rot == 270:
+            return QPointF(py * self.zoom, (self._page_w_pt - px) * self.zoom)
+        return QPointF(px * self.zoom, py * self.zoom)
+
+    def _pdf_rect_to_display_qrect(self, r: tuple[float, float, float, float]) -> QRect:
+        p0 = self._to_display_pt(r[0], r[1])
+        p1 = self._to_display_pt(r[2], r[3])
+        x0 = int(round(min(p0.x(), p1.x())))
+        y0 = int(round(min(p0.y(), p1.y())))
+        x1 = int(round(max(p0.x(), p1.x())))
+        y1 = int(round(max(p0.y(), p1.y())))
+        return QRect(x0, y0, max(20, x1 - x0), max(18, y1 - y0))
+
+    def close_active_form_editor(self) -> None:
+        fe = self._active_form_editor
+        self._active_form_editor = None
+        if fe is not None and shiboken6.isValid(fe):
+            fe.hide()
+            fe.deleteLater()
 
     def _find_scroll_area(self) -> QScrollArea | None:
         parent = self.parentWidget()
@@ -386,6 +424,8 @@ class PDFPageWidget(QWidget):
             self.commit_active_editor()
             if not shiboken6.isValid(self) or self.parent() is None:
                 return
+        if self._active_form_editor is not None:
+            self.close_active_form_editor()
 
         if self.active_tool == "pan":
             self._panning = True
@@ -451,9 +491,16 @@ class PDFPageWidget(QWidget):
             self._erase_at(px, py)
             return
 
+        if self.active_tool == "select":
+            fw = self.engine.find_form_widget_at(self.page_idx, px, py)
+            if fw is not None and not fw["is_readonly"]:
+                self._activate_form_widget(fw)
+                return
+
         if self.active_tool in ("select", "underline", "strikethrough", "highlight_sel"):
             self._sel_start = (px, py)
             self._sel_cur = (px, py)
+            self._sel_dragged = False
             self._selected_quads = []
             self._selected_text = ""
             self.update()
@@ -504,6 +551,8 @@ class PDFPageWidget(QWidget):
 
         if self._sel_start is not None:
             self._sel_cur = (px, py)
+            if math.hypot(px - self._sel_start[0], py - self._sel_start[1]) >= 3.0:
+                self._sel_dragged = True
             self._update_text_selection()
             self.update()
             return
@@ -519,6 +568,29 @@ class PDFPageWidget(QWidget):
                 self.setCursor(Qt.IBeamCursor if blk else Qt.ArrowCursor)
                 self.update()
             return
+
+        if self.active_tool == "select":
+            fw = self.engine.find_form_widget_at(self.page_idx, px, py)
+            if fw != self._hover_widget:
+                self._hover_widget = fw
+                self.update()
+            if fw is not None and not fw["is_readonly"]:
+                ft = fw["field_type"]
+                self.setCursor(
+                    Qt.IBeamCursor if ft == pymupdf.PDF_WIDGET_TYPE_TEXT else Qt.PointingHandCursor
+                )
+            else:
+                lnk = self.engine.find_link_at(self.page_idx, px, py)
+                if lnk is not None:
+                    self.setCursor(Qt.PointingHandCursor)
+                    if "page" in lnk and lnk["page"] >= 0:
+                        QToolTip.showText(
+                            event.globalPosition().toPoint(), f"Go to Page {lnk['page'] + 1}", self
+                        )
+                    elif lnk.get("uri"):
+                        QToolTip.showText(event.globalPosition().toPoint(), str(lnk["uri"]), self)
+                    return
+                self.setCursor(Qt.IBeamCursor)
 
         note = self._find_sticky_note_at(px, py)
         if note is not None:
@@ -597,10 +669,21 @@ class PDFPageWidget(QWidget):
             return
 
         if self._sel_start is not None:
-            self._sel_cur = self._to_pdf_pt(event.position())
+            px, py = self._to_pdf_pt(event.position())
+            self._sel_cur = (px, py)
+            dragged = self._sel_dragged or math.hypot(px - self._sel_start[0], py - self._sel_start[1]) >= 3.0
             self._update_text_selection()
             self._sel_start = None
             self._sel_cur = None
+            self._sel_dragged = False
+            if self.active_tool == "select" and not dragged:
+                lnk = self.engine.find_link_at(self.page_idx, px, py)
+                if lnk is not None:
+                    self._selected_quads = []
+                    self._selected_text = ""
+                    self.update()
+                    self.linkClicked.emit(lnk)
+                    return
             if self._selected_quads and self.active_tool in ("underline", "strikethrough", "highlight_sel"):
                 mtype = "highlight" if self.active_tool == "highlight_sel" else self.active_tool
                 self._create_markup_from_selection(mtype)
@@ -814,6 +897,104 @@ class PDFPageWidget(QWidget):
                 return True
         return False
 
+    def _activate_form_widget(self, fw: dict) -> None:
+        self.close_active_form_editor()
+        ft = fw["field_type"]
+        w_idx = fw["idx"]
+        old_val = fw["value"]
+
+        if ft == pymupdf.PDF_WIDGET_TYPE_CHECKBOX:
+            is_checked = str(old_val) not in ("", "Off", "False", "false", "None", "0")
+            on_val = fw["on_state"] if fw["on_state"] not in (None, "None", "") else True
+            new_val: object = False if is_checked else on_val
+            self.engine.set_form_value(self.page_idx, w_idx, new_val)
+            self.refresh_render()
+            self.formFieldEdited.emit(self.page_idx, w_idx, old_val, new_val)
+            return
+
+        if ft == pymupdf.PDF_WIDGET_TYPE_RADIOBUTTON:
+            new_val = fw["on_state"] if fw["on_state"] not in (None, "None", "") else True
+            if old_val != new_val:
+                self.engine.set_form_value(self.page_idx, w_idx, new_val)
+                self.refresh_render()
+                self.formFieldEdited.emit(self.page_idx, w_idx, old_val, new_val)
+            return
+
+        rect = self._pdf_rect_to_display_qrect(fw["rect"])
+        if ft == pymupdf.PDF_WIDGET_TYPE_TEXT:
+            le = QLineEdit(str(old_val or ""), self)
+            le.setGeometry(rect)
+            le.setStyleSheet(
+                f"background:#ffffff; color:#0f172a; border:2px solid {self.accent_color}; "
+                "border-radius:2px; padding:0px 4px;"
+            )
+            state = {"done": False}
+
+            def _commit() -> None:
+                if state["done"]:
+                    return
+                state["done"] = True
+                new_txt = le.text()
+                self.close_active_form_editor()
+                if new_txt != str(old_val or ""):
+                    self.engine.set_form_value(self.page_idx, w_idx, new_txt)
+                    self.refresh_render()
+                    self.formFieldEdited.emit(self.page_idx, w_idx, old_val, new_txt)
+
+            class _FormFilter(QObject):
+                def eventFilter(self, obj, ev):
+                    if ev.type() == QEvent.KeyPress and ev.key() == Qt.Key_Escape:
+                        state["done"] = True
+                        self_outer.close_active_form_editor()
+                        return True
+                    return False
+
+            self_outer = self
+            flt = _FormFilter(le)
+            le.installEventFilter(flt)
+            le.returnPressed.connect(_commit)
+            le.editingFinished.connect(_commit)
+            self._active_form_editor = le
+            le.show()
+            le.selectAll()
+            le.setFocus()
+            return
+
+        if ft in (pymupdf.PDF_WIDGET_TYPE_COMBOBOX, pymupdf.PDF_WIDGET_TYPE_LISTBOX) and fw["choices"]:
+            class _FormComboBox(QComboBox):
+                def hidePopup(self_cb) -> None:
+                    super().hidePopup()
+                    QTimer.singleShot(
+                        0,
+                        lambda: self.close_active_form_editor()
+                        if self._active_form_editor is self_cb
+                        else None,
+                    )
+
+            cb = _FormComboBox(self)
+            cb.addItems([str(c) for c in fw["choices"]])
+            cur_idx = cb.findText(str(old_val or ""))
+            if cur_idx >= 0:
+                cb.setCurrentIndex(cur_idx)
+            cb.setGeometry(rect)
+            cb.setStyleSheet(
+                f"background:#ffffff; color:#0f172a; border:2px solid {self.accent_color}; border-radius:2px;"
+            )
+
+            def _picked(idx: int) -> None:
+                choice = cb.itemText(idx)
+                self.close_active_form_editor()
+                if choice != str(old_val or ""):
+                    self.engine.set_form_value(self.page_idx, w_idx, choice)
+                    self.refresh_render()
+                    self.formFieldEdited.emit(self.page_idx, w_idx, old_val, choice)
+
+            cb.activated.connect(_picked)
+            self._active_form_editor = cb
+            cb.show()
+            cb.setFocus()
+            cb.showPopup()
+
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if event.key() in (Qt.Key_Delete, Qt.Key_Backspace) and self.selected_item is not None:
             if not getattr(self.selected_item, "locked", False):
@@ -920,11 +1101,14 @@ class PDFPageWidget(QWidget):
             col.setAlphaF(0.28)
             painter.fillRect(self._to_widget_rect(qr), col)
 
-        # 3. Hover frame for editable text blocks
+        # 3. Hover frame for editable text blocks or interactive form fields
         if self._hover_block is not None and self.active_tool == "edit_text":
             pen = QPen(_qcolor(self.accent_color, 0.85), 1.5, Qt.DashLine)
             painter.setPen(pen)
             painter.drawRect(self._to_widget_rect(self._hover_block.rect))
+        elif self._hover_widget is not None and self.active_tool == "select" and not self._hover_widget["is_readonly"]:
+            painter.setPen(QPen(QColor("#2563eb"), 1.5, Qt.DashLine))
+            painter.drawRect(self._to_widget_rect(self._hover_widget["rect"]))
 
         # 4. Text markups (highlight / underline / strikethrough)
         for mk in self.engine.markups.get(self.page_idx, []):

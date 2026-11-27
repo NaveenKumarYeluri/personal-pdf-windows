@@ -799,3 +799,76 @@ def test_overlay_move_rotate_sticky_edit_undo_and_double_click_word(qtbot, monke
     assert nt.color_hex == "#facc15"
     win.undo()
     assert nt.text == "Initial note"
+
+
+def test_interactive_forms_and_pdf_links(qtbot):
+    from PySide6.QtWidgets import QLineEdit
+
+    doc = pymupdf.open()
+    doc.new_page(width=500, height=600)
+    doc.new_page(width=500, height=600)
+    p1 = doc[0]
+    p2 = doc[1]
+    p1.insert_text((40, 40), "Jump target test", fontsize=12)
+    p2.insert_text((40, 40), "Page two target", fontsize=12)
+    p1.insert_link({"kind": pymupdf.LINK_GOTO, "from": pymupdf.Rect(40, 60, 180, 85), "page": 1})
+
+    w_txt = pymupdf.Widget()
+    w_txt.field_type = pymupdf.PDF_WIDGET_TYPE_TEXT
+    w_txt.field_name = "user_name"
+    w_txt.rect = pymupdf.Rect(40, 110, 220, 138)
+    p1.add_widget(w_txt)
+
+    w_chk = pymupdf.Widget()
+    w_chk.field_type = pymupdf.PDF_WIDGET_TYPE_CHECKBOX
+    w_chk.field_name = "opt_in"
+    w_chk.rect = pymupdf.Rect(40, 160, 65, 185)
+    p1.add_widget(w_chk)
+
+    w_cb = pymupdf.Widget()
+    w_cb.field_type = pymupdf.PDF_WIDGET_TYPE_COMBOBOX
+    w_cb.field_name = "plan"
+    w_cb.choice_values = ["Basic", "Pro"]
+    w_cb.field_value = "Basic"
+    w_cb.rect = pymupdf.Rect(40, 210, 180, 238)
+    p1.add_widget(w_cb)
+
+    pdf_bytes = doc.tobytes()
+    doc.close()
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+    tab = win.open_pdf_bytes(pdf_bytes, "forms_links.pdf")
+    pw0 = tab.page_widgets[0]
+
+    # Clicking internal PDF link jumps to target page
+    lnk_pt = QPoint(int(100 * pw0.zoom), int(72 * pw0.zoom))
+    QTest.mouseClick(pw0, Qt.LeftButton, Qt.NoModifier, lnk_pt)
+    assert tab.current_page == 1
+    win.go_to_page(0)
+
+    # Interactive form fields: checkbox toggle, text field edit, and Undo back to clean
+    chk_pt = QPoint(int(52 * pw0.zoom), int(172 * pw0.zoom))
+    QTest.mouseClick(pw0, Qt.LeftButton, Qt.NoModifier, chk_pt)
+    assert tab.engine.form_values[(0, 1)] == "Yes"
+    assert tab.dirty is True
+
+    txt_pt = QPoint(int(100 * pw0.zoom), int(124 * pw0.zoom))
+    QTest.mouseClick(pw0, Qt.LeftButton, Qt.NoModifier, txt_pt)
+    le = pw0.findChild(QLineEdit)
+    assert le is not None
+    le.setText("Bob Smith")
+    QTest.keyClick(le, Qt.Key_Return)
+    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert tab.engine.form_values[(0, 0)] == "Bob Smith"
+
+    out_doc = pymupdf.open(stream=tab.engine.build_final_pdf_bytes(), filetype="pdf")
+    assert next(w for w in out_doc[0].widgets() if w.field_name == "user_name").field_value == "Bob Smith"
+    assert next(w for w in out_doc[0].widgets() if w.field_name == "opt_in").field_value == "Yes"
+    out_doc.close()
+
+    win.undo()
+    win.undo()
+    assert tab.engine.form_values == {}
+    assert tab.dirty is False

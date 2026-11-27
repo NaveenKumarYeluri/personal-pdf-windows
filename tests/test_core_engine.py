@@ -188,3 +188,50 @@ def test_rotated_image_overlay_and_sticky_note_color_export():
     assert len(annots) == 1
     assert abs(annots[0].colors["stroke"][1] - (0xC5 / 255.0)) < 0.03
     doc.close()
+
+
+def test_form_widgets_engine_and_links():
+    from app.core.document_ops import flatten_form_fields
+
+    doc = pymupdf.open()
+    doc.new_page(width=400, height=500)
+    doc.new_page(width=400, height=500)
+    p1 = doc[0]
+    p1.insert_link({"kind": pymupdf.LINK_GOTO, "from": pymupdf.Rect(20, 20, 120, 40), "page": 1})
+
+    w_txt = pymupdf.Widget()
+    w_txt.field_type = pymupdf.PDF_WIDGET_TYPE_TEXT
+    w_txt.field_name = "applicant"
+    w_txt.rect = pymupdf.Rect(40, 80, 200, 105)
+    p1.add_widget(w_txt)
+
+    w_chk = pymupdf.Widget()
+    w_chk.field_type = pymupdf.PDF_WIDGET_TYPE_CHECKBOX
+    w_chk.field_name = "terms"
+    w_chk.rect = pymupdf.Rect(40, 120, 60, 140)
+    p1.add_widget(w_chk)
+
+    raw = doc.tobytes()
+    doc.close()
+
+    eng = PDFDocumentEngine(raw, "form.pdf")
+    lnk = eng.find_link_at(0, 50, 30)
+    assert lnk is not None and lnk["page"] == 1
+    assert len(eng.get_form_widgets(0)) == 2
+    assert eng.find_form_widget_at(0, 100, 90)["field_name"] == "applicant"
+
+    eng.set_form_value(0, 0, "Jane Doe")
+    eng.set_form_value(0, 1, "Yes")
+    assert eng.get_page_render_revision(0) > 0
+    assert eng.get_page_render_revision(1) == 0
+
+    final = eng.build_final_pdf_bytes()
+    flat, cnt = flatten_form_fields(final)
+    assert cnt == 2
+    d_flat = pymupdf.open(stream=flat, filetype="pdf")
+    assert "Jane Doe" in d_flat[0].get_text("text")
+    d_flat.close()
+
+    eng.remove_form_value(0, 0)
+    eng.remove_form_value(0, 1)
+    assert eng.get_page_render_revision(0) == 0

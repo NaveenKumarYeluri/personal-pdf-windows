@@ -8,8 +8,18 @@ from dataclasses import dataclass
 
 import pymupdf
 import shiboken6
-from PySide6.QtCore import QPoint, QSettings, QSize, Qt
-from PySide6.QtGui import QCloseEvent, QDragEnterEvent, QDropEvent, QIcon, QImage, QKeySequence, QPainter, QShortcut
+from PySide6.QtCore import QPoint, QSettings, QSize, Qt, QUrl
+from PySide6.QtGui import (
+    QCloseEvent,
+    QDesktopServices,
+    QDragEnterEvent,
+    QDropEvent,
+    QIcon,
+    QImage,
+    QKeySequence,
+    QPainter,
+    QShortcut,
+)
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
     QApplication,
@@ -148,11 +158,13 @@ class DocumentTab(QScrollArea):
         for pno, pw in enumerate(self.page_widgets):
             if pw.active_editor is not None:
                 pw.cancel_active_editor()
+            pw.close_active_form_editor()
             pw.engine = self.engine
             pw.page_idx = pno
             pw.accent_color = self.accent_color
             pw.selected_item = None
             pw._hover_block = None
+            pw._hover_widget = None
             pw.clear_text_selection()
             pw.set_tool_state(**tool_state)
             pw.set_view_params(self.zoom, self.rotation)
@@ -173,6 +185,8 @@ class DocumentTab(QScrollArea):
             pw.annotationAdded.connect(callbacks["annot_added"])
             pw.annotationRemoved.connect(callbacks["annot_removed"])
             pw.annotationModified.connect(callbacks["annot_modified"])
+            pw.linkClicked.connect(callbacks["link_clicked"])
+            pw.formFieldEdited.connect(callbacks["form_edited"])
             pw.pageInteracted.connect(callbacks["page_interacted"])
             self.pages_layout.addWidget(pw)
             self.page_widgets.append(pw)
@@ -640,6 +654,10 @@ class MainWindow(QMainWindow):
             "annot_modified": lambda pno, kind, item, prop, old_v, new_v: self._on_annot_modified(
                 tab, pno, kind, item, prop, old_v, new_v
             ),
+            "link_clicked": lambda lnk: self._on_link_clicked(tab, lnk),
+            "form_edited": lambda pno, w_idx, old_v, new_v: self._on_form_field_edited(
+                tab, pno, w_idx, old_v, new_v
+            ),
             "page_interacted": lambda pno: self._on_page_interacted(tab, pno),
         }
 
@@ -918,6 +936,41 @@ class MainWindow(QMainWindow):
         self._set_tab_dirty(tab, True)
         self.sidebar.refresh_annotations()
 
+    def _on_form_field_edited(
+        self, tab: DocumentTab, page_idx: int, widget_idx: int, old_val: object, new_val: object
+    ) -> None:
+        had_prev = any(
+            e.action == "form_value" and e.page_idx == page_idx and e.payload == widget_idx
+            for e in tab.undo_stack
+        )
+        tab.undo_stack.append(
+            _UndoEntry(
+                kind="form_value",
+                page_idx=page_idx,
+                payload=widget_idx,
+                previous_payload=(had_prev, old_val),
+                action="form_value",
+                new_value=new_val,
+            )
+        )
+        tab.redo_stack.clear()
+        self._set_tab_dirty(tab, True)
+        self.sidebar.refresh_annotations()
+        self.status_bar.showMessage(f"Updated form field on Page {page_idx + 1}")
+
+    def _on_link_clicked(self, tab: DocumentTab, lnk: dict) -> None:
+        page = lnk.get("page")
+        if isinstance(page, int) and 0 <= page < tab.engine.page_count:
+            self.go_to_page(page)
+            self.status_bar.showMessage(f"Jumped to Page {page + 1}")
+            return
+        uri = str(lnk.get("uri") or "").strip()
+        if uri:
+            url = QUrl(uri)
+            if url.isValid() and url.scheme().lower() in ("http", "https", "mailto"):
+                QDesktopServices.openUrl(url)
+                self.status_bar.showMessage(f"Opened link: {uri}")
+
     def undo(self) -> None:
         tab = self.current_tab()
         if tab is None or not tab.undo_stack:
@@ -934,6 +987,16 @@ class MainWindow(QMainWindow):
             else:
                 tab.engine.remove_in_place_edit(entry.page_idx, op.block_id)
             self._rebuild_tab_pages(tab)
+            self.sidebar.refresh_thumbnails()
+        elif entry.action == "form_value":
+            w_idx = int(entry.payload)
+            had_prev, prev_val = entry.previous_payload
+            if had_prev:
+                tab.engine.set_form_value(entry.page_idx, w_idx, prev_val)
+            else:
+                tab.engine.remove_form_value(entry.page_idx, w_idx)
+            if 0 <= entry.page_idx < len(tab.page_widgets):
+                tab.page_widgets[entry.page_idx].refresh_render()
             self.sidebar.refresh_thumbnails()
         elif entry.action == "modify":
             store = self._store_for_kind(tab.engine, entry.kind)
@@ -979,6 +1042,12 @@ class MainWindow(QMainWindow):
         if entry.kind == "in_place_edit":
             tab.engine.set_in_place_edit(entry.payload)
             self._rebuild_tab_pages(tab)
+            self.sidebar.refresh_thumbnails()
+        elif entry.action == "form_value":
+            w_idx = int(entry.payload)
+            tab.engine.set_form_value(entry.page_idx, w_idx, entry.new_value)
+            if 0 <= entry.page_idx < len(tab.page_widgets):
+                tab.page_widgets[entry.page_idx].refresh_render()
             self.sidebar.refresh_thumbnails()
         elif entry.action == "modify":
             store = self._store_for_kind(tab.engine, entry.kind)

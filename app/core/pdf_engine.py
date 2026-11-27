@@ -291,6 +291,7 @@ class PDFDocumentEngine:
         self.whiteouts: dict[int, list[WhiteoutBox]] = {}
         self.redactions: dict[int, list[RedactionBox]] = {}
         self.custom_bookmarks: list[tuple[str, int]] = []  # (title, page_idx)
+        self.form_values: dict[tuple[int, int], object] = {}  # (page_idx, widget_idx) -> value
 
         self._working_bytes_cache: bytes | None = None
         self._working_doc: pymupdf.Document | None = None
@@ -342,7 +343,8 @@ class PDFDocumentEngine:
 
     def get_page_render_revision(self, page_idx: int) -> int:
         """Return 0 for untouched base pages, or current edit revision for modified/overflowed pages."""
-        if not any(v for v in self.in_place_edits.values()):
+        has_text_edits = any(v for v in self.in_place_edits.values())
+        if not has_text_edits and not self.form_values:
             return 0
         self._get_preview_doc()
         return self._edit_revision if page_idx in self._modified_pages else 0
@@ -360,8 +362,28 @@ class PDFDocumentEngine:
                 any(v for v in self.whiteouts.values()),
                 any(v for v in self.redactions.values()),
                 bool(self.custom_bookmarks),
+                bool(self.form_values),
             ]
         )
+
+    def _apply_form_values_to_doc(self, doc: pymupdf.Document) -> None:
+        """Apply pending interactive form widget values onto an open MuPDF document."""
+        if not self.form_values:
+            return
+        by_page: dict[int, list[tuple[int, object]]] = {}
+        for (p_idx, w_idx), val in self.form_values.items():
+            by_page.setdefault(p_idx, []).append((w_idx, val))
+        for p_idx, updates in by_page.items():
+            if not (0 <= p_idx < len(doc)):
+                continue
+            page = doc[p_idx]
+            widgets = list(page.widgets())
+            for w_idx, val in updates:
+                if 0 <= w_idx < len(widgets):
+                    w = widgets[w_idx]
+                    w.field_value = val
+                    w.update()
+                    self._modified_pages.add(p_idx)
 
     def _get_preview_doc(self) -> pymupdf.Document:
         """
@@ -374,7 +396,10 @@ class PDFDocumentEngine:
             self._working_bytes_cache = self.build_bytes_with_text_edits(self.base_pdf_bytes)
         else:
             self._working_bytes_cache = self.base_pdf_bytes
-        self._working_doc = pymupdf.open(stream=self._working_bytes_cache, filetype="pdf")
+        doc = pymupdf.open(stream=self._working_bytes_cache, filetype="pdf")
+        if self.form_values:
+            self._apply_form_values_to_doc(doc)
+        self._working_doc = doc
         return self._working_doc
 
     def get_base_doc(self) -> pymupdf.Document:
@@ -444,6 +469,70 @@ class PDFDocumentEngine:
             for r in rects:
                 hits.append(SearchHit(page_idx=pno, rect=(r.x0, r.y0, r.x1, r.y1), snippet=q))
         return hits
+
+    def get_page_links(self, page_idx: int) -> list[dict]:
+        """Return MuPDF hyperlink descriptors on page_idx."""
+        if not self.base_pdf_bytes or self.needs_password:
+            return []
+        doc = self._get_preview_doc()
+        if not (0 <= page_idx < len(doc)):
+            return []
+        page = doc[page_idx]
+        return list(page.get_links() or [])
+
+    def find_link_at(self, page_idx: int, pt_x: float, pt_y: float) -> dict | None:
+        """Return the PDF link containing (pt_x, pt_y) in PDF points, if any."""
+        pt = pymupdf.Point(pt_x, pt_y)
+        for lnk in self.get_page_links(page_idx):
+            rect = lnk.get("from")
+            if rect is not None and pymupdf.Rect(rect).contains(pt):
+                return lnk
+        return None
+
+    def get_form_widgets(self, page_idx: int) -> list[dict]:
+        """Return interactive AcroForm widget descriptors for page_idx."""
+        if not self.base_pdf_bytes or self.needs_password:
+            return []
+        doc = self._get_preview_doc()
+        if not (0 <= page_idx < len(doc)):
+            return []
+        page = doc[page_idx]
+        out: list[dict] = []
+        for idx, w in enumerate(page.widgets()):
+            r = w.rect
+            try:
+                on_state = w.on_state()
+            except Exception:
+                on_state = None
+            out.append(
+                {
+                    "idx": idx,
+                    "rect": (float(r.x0), float(r.y0), float(r.x1), float(r.y1)),
+                    "field_type": int(w.field_type),
+                    "field_name": w.field_name or f"field_{idx}",
+                    "value": w.field_value,
+                    "on_state": on_state,
+                    "choices": list(w.choice_values or []),
+                    "is_readonly": bool(w.field_flags & pymupdf.PDF_FIELD_IS_READ_ONLY),
+                }
+            )
+        return out
+
+    def find_form_widget_at(self, page_idx: int, pt_x: float, pt_y: float) -> dict | None:
+        """Locate the interactive form widget containing (pt_x, pt_y) in PDF points."""
+        pt = pymupdf.Point(pt_x, pt_y)
+        for w in self.get_form_widgets(page_idx):
+            if pymupdf.Rect(w["rect"]).contains(pt):
+                return w
+        return None
+
+    def set_form_value(self, page_idx: int, widget_idx: int, value: object) -> None:
+        self.form_values[(page_idx, widget_idx)] = value
+        self.invalidate_cache()
+
+    def remove_form_value(self, page_idx: int, widget_idx: int) -> None:
+        self.form_values.pop((page_idx, widget_idx), None)
+        self.invalidate_cache()
 
     def extract_text_blocks(self, page_idx: int, use_base: bool = False) -> list[TextBlock]:
         """Extract clean structural paragraph/heading blocks with healed text and rich HTML."""
@@ -1180,6 +1269,8 @@ class PDFDocumentEngine:
             else self.base_pdf_bytes
         )
         doc = pymupdf.open(stream=working_bytes, filetype="pdf")
+        if self.form_values:
+            self._apply_form_values_to_doc(doc)
         css = build_mupdf_font_css()
         arch = get_windows_font_archive()
 
