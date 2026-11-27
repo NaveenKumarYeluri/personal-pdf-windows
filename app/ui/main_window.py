@@ -80,6 +80,8 @@ class _UndoEntry:
     payload: object
     previous_payload: object | None = None
     action: str = "add"
+    prop_name: str = ""
+    new_value: object = None
 
 
 class DocumentTab(QScrollArea):
@@ -170,6 +172,7 @@ class DocumentTab(QScrollArea):
             pw.inPlaceEditCommitted.connect(callbacks["edit_committed"])
             pw.annotationAdded.connect(callbacks["annot_added"])
             pw.annotationRemoved.connect(callbacks["annot_removed"])
+            pw.annotationModified.connect(callbacks["annot_modified"])
             pw.pageInteracted.connect(callbacks["page_interacted"])
             self.pages_layout.addWidget(pw)
             self.page_widgets.append(pw)
@@ -634,6 +637,9 @@ class MainWindow(QMainWindow):
             "edit_committed": lambda pno, op: self._on_in_place_edit_committed(tab, pno, op),
             "annot_added": lambda pno, kind, item: self._on_annot_added(tab, pno, kind, item),
             "annot_removed": lambda pno, kind, item: self._on_annot_removed(tab, pno, kind, item),
+            "annot_modified": lambda pno, kind, item, prop, old_v, new_v: self._on_annot_modified(
+                tab, pno, kind, item, prop, old_v, new_v
+            ),
             "page_interacted": lambda pno: self._on_page_interacted(tab, pno),
         }
 
@@ -887,6 +893,31 @@ class MainWindow(QMainWindow):
         self._set_tab_dirty(tab, True)
         self.sidebar.refresh_annotations()
 
+    def _on_annot_modified(
+        self,
+        tab: DocumentTab,
+        page_idx: int,
+        kind: str,
+        item: object,
+        prop_name: str,
+        old_val: object,
+        new_val: object,
+    ) -> None:
+        tab.undo_stack.append(
+            _UndoEntry(
+                kind=kind,
+                page_idx=page_idx,
+                payload=item,
+                previous_payload=old_val,
+                action="modify",
+                prop_name=prop_name,
+                new_value=new_val,
+            )
+        )
+        tab.redo_stack.clear()
+        self._set_tab_dirty(tab, True)
+        self.sidebar.refresh_annotations()
+
     def undo(self) -> None:
         tab = self.current_tab()
         if tab is None or not tab.undo_stack:
@@ -904,6 +935,18 @@ class MainWindow(QMainWindow):
                 tab.engine.remove_in_place_edit(entry.page_idx, op.block_id)
             self._rebuild_tab_pages(tab)
             self.sidebar.refresh_thumbnails()
+        elif entry.action == "modify":
+            store = self._store_for_kind(tab.engine, entry.kind)
+            lst = store.setdefault(entry.page_idx, [])
+            if entry.prop_name == "z_order":
+                if entry.payload in lst and isinstance(entry.previous_payload, int):
+                    lst.remove(entry.payload)
+                    idx = max(0, min(len(lst), entry.previous_payload))
+                    lst.insert(idx, entry.payload)
+            elif entry.prop_name:
+                setattr(entry.payload, entry.prop_name, entry.previous_payload)
+            if 0 <= entry.page_idx < len(tab.page_widgets):
+                tab.page_widgets[entry.page_idx].update()
         else:
             store = self._store_for_kind(tab.engine, entry.kind)
             lst = store.setdefault(entry.page_idx, [])
@@ -937,6 +980,17 @@ class MainWindow(QMainWindow):
             tab.engine.set_in_place_edit(entry.payload)
             self._rebuild_tab_pages(tab)
             self.sidebar.refresh_thumbnails()
+        elif entry.action == "modify":
+            store = self._store_for_kind(tab.engine, entry.kind)
+            lst = store.setdefault(entry.page_idx, [])
+            if entry.prop_name == "z_order":
+                if entry.payload in lst:
+                    lst.remove(entry.payload)
+                    lst.append(entry.payload)
+            elif entry.prop_name:
+                setattr(entry.payload, entry.prop_name, entry.new_value)
+            if 0 <= entry.page_idx < len(tab.page_widgets):
+                tab.page_widgets[entry.page_idx].update()
         else:
             store = self._store_for_kind(tab.engine, entry.kind)
             lst = store.setdefault(entry.page_idx, [])

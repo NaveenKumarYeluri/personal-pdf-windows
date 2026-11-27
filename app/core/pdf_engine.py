@@ -1269,8 +1269,18 @@ class PDFDocumentEngine:
             for stp in self.stamps.get(page_idx, []):
                 r = pymupdf.Rect(stp.rect)
                 if stp.kind == "image" and stp.image_bytes:
-                    rot_val = int(round(stp.rotation / 90.0) * 90) % 360
-                    page.insert_image(r, stream=stp.image_bytes, rotate=rot_val, keep_proportion=True)
+                    # Qt rotates clockwise whereas MuPDF insert_image(rotate=...) rotates counter-clockwise
+                    mupdf_rot = (-int(round(stp.rotation / 90.0) * 90)) % 360
+                    target_r = r
+                    if mupdf_rot in (90, 270):
+                        cx, cy = (r.x0 + r.x1) / 2.0, (r.y0 + r.y1) / 2.0
+                        target_r = pymupdf.Rect(
+                            cx - r.height / 2.0,
+                            cy - r.width / 2.0,
+                            cx + r.height / 2.0,
+                            cy + r.width / 2.0,
+                        )
+                    page.insert_image(target_r, stream=stp.image_bytes, rotate=mupdf_rot, keep_proportion=True)
                 elif stp.kind == "stamp" and stp.text:
                     col = _hex_to_rgb01(stp.color_hex)
                     shape = page.new_shape()
@@ -1300,6 +1310,8 @@ class PDFDocumentEngine:
             for note in self.sticky_notes.get(page_idx, []):
                 annot = page.add_text_annot((note.x, note.y), note.text, icon="Comment")
                 annot.set_info(title=note.author, content=note.text)
+                if note.color_hex:
+                    annot.set_colors(stroke=_hex_to_rgb01(note.color_hex))
                 annot.update()
 
         # Append custom bookmarks to TOC

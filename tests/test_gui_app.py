@@ -730,3 +730,72 @@ def test_unsaved_changes_prompt_tab_and_window_close(qtbot, tmp_path, monkeypatc
     win._set_tab_dirty(tab2, True)
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **kw: QMessageBox.Discard)
     assert win.close() is True
+
+
+def test_overlay_move_rotate_sticky_edit_undo_and_double_click_word(qtbot, monkeypatch):
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QColorDialog, QInputDialog
+    from app.core.models import StampItem, StickyNote
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+
+    tab = win.load_sample_pdf()
+    pw0 = tab.page_widgets[0]
+
+    # 1. Double-clicking in select mode selects word without needing drag
+    blk0 = tab.engine.extract_text_blocks(0)[0]
+    word_pt = QPoint(int((blk0.rect[0] + 15) * pw0.zoom), int(((blk0.rect[1] + blk0.rect[3]) / 2) * pw0.zoom))
+    QTest.mouseDClick(pw0, Qt.LeftButton, Qt.NoModifier, word_pt)
+    assert pw0.get_selected_text().strip() != ""
+    pw0.clear_text_selection()
+
+    # 2. Drag-moving an overlay records dirty + undoable rect change; double-clicking text stamp edits text
+    stp = StampItem(page_idx=0, kind="stamp", rect=(80.0, 120.0, 220.0, 170.0), text="DRAFT")
+    tab.engine.stamps[0] = [stp]
+    p_center = QPoint(int(150 * pw0.zoom), int(145 * pw0.zoom))
+    p_moved = QPoint(int(210 * pw0.zoom), int(195 * pw0.zoom))
+    QTest.mousePress(pw0, Qt.LeftButton, Qt.NoModifier, p_center)
+    QTest.mouseMove(pw0, p_moved)
+    QTest.mouseRelease(pw0, Qt.LeftButton, Qt.NoModifier, p_moved)
+    assert tab.dirty is True
+    moved_rect = stp.rect
+    assert moved_rect[0] > 100.0
+
+    # Double-click stamp edits text rather than deleting it!
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **kw: ("FINAL", True))
+    QTest.mouseDClick(pw0, Qt.LeftButton, Qt.NoModifier, p_moved)
+    assert len(tab.engine.stamps[0]) == 1
+    assert stp.text == "FINAL"
+
+    win.undo()  # undo text edit
+    assert stp.text == "DRAFT"
+    win.undo()  # undo move
+    assert stp.rect == (80.0, 120.0, 220.0, 170.0)
+    win.redo()
+    assert stp.rect == moved_rect
+
+    # 3. Rotate overlay via context menu is undoable & dirty
+    menu = pw0.build_context_menu(QPointF(p_moved))
+    next(a for a in menu.actions() if a.text() == "Rotate Overlay 90° CW").trigger()
+    assert stp.rotation == 82.0
+    win.undo()
+    assert stp.rotation == -8.0
+
+    # 4. Sticky note edit & color change syncs sidebar & supports undo
+    nt = StickyNote(page_idx=0, x=280.0, y=280.0, text="Initial note")
+    tab.engine.sticky_notes[0] = [nt]
+    win.sidebar.refresh_annotations()
+    monkeypatch.setattr(QInputDialog, "getMultiLineText", lambda *a, **kw: ("Updated note", True))
+    monkeypatch.setattr(QColorDialog, "getColor", lambda *a, **kw: QColor("#22c55e"))
+    nt_menu = pw0.build_context_menu(QPointF(280.0 * pw0.zoom, 280.0 * pw0.zoom))
+    next(a for a in nt_menu.actions() if a.text() == "Edit Sticky Note...").trigger()
+    next(a for a in nt_menu.actions() if a.text() == "Note Color...").trigger()
+    assert nt.text == "Updated note"
+    assert nt.color_hex == "#22c55e"
+    assert any("Updated note" in win.sidebar.annot_list.item(i).text() for i in range(win.sidebar.annot_list.count()))
+    win.undo()
+    assert nt.color_hex == "#facc15"
+    win.undo()
+    assert nt.text == "Initial note"

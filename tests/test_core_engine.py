@@ -149,3 +149,42 @@ def test_signature_extraction_downscales_oversized_photo():
     import numpy as np
 
     assert bool(np.any(np.array(out)[:, :, 3] > 150))
+
+
+def test_rotated_image_overlay_and_sticky_note_color_export():
+    from app.core.models import StampItem, StickyNote
+    from app.core.pdf_engine import create_blank_pdf_bytes
+
+    im = Image.new("RGB", (200, 100), (255, 255, 255))
+    for x in range(200):
+        for y in range(20):
+            im.putpixel((x, y), (255, 0, 0))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+
+    eng = PDFDocumentEngine(create_blank_pdf_bytes(), "rot.pdf")
+    eng.stamps[0] = [
+        StampItem(
+            page_idx=0,
+            kind="image",
+            rect=(100.0, 200.0, 300.0, 300.0),
+            opacity=1.0,
+            rotation=90.0,
+            image_bytes=buf.getvalue(),
+        )
+    ]
+    eng.sticky_notes[0] = [
+        StickyNote(page_idx=0, x=80.0, y=90.0, text="Green note", color_hex="#22c55e")
+    ]
+    out_bytes = eng.build_final_pdf_bytes()
+    doc = pymupdf.open(stream=out_bytes, filetype="pdf")
+    page = doc[0]
+    pix = page.get_pixmap(dpi=72, alpha=False)
+    # 90 deg CW moves top red stripe to right side of rotated box (center 200,250 -> x~240, y~250)
+    assert pix.pixel(240, 250)[0] > 200 and pix.pixel(240, 250)[1] < 50
+    assert pix.pixel(160, 250)[1] > 200
+
+    annots = list(page.annots())
+    assert len(annots) == 1
+    assert abs(annots[0].colors["stroke"][1] - (0xC5 / 255.0)) < 0.03
+    doc.close()

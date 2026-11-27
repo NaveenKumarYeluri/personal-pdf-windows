@@ -19,8 +19,17 @@ from PySide6.QtGui import (
     QPainterPath,
     QPen,
     QPixmap,
+    QTextDocument,
 )
-from PySide6.QtWidgets import QApplication, QInputDialog, QMenu, QScrollArea, QToolTip, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QColorDialog,
+    QInputDialog,
+    QMenu,
+    QScrollArea,
+    QToolTip,
+    QWidget,
+)
 
 from app.core.ligatures import heal_pdf_text
 from app.core.models import (
@@ -54,6 +63,7 @@ class PDFPageWidget(QWidget):
     inPlaceEditCommitted = Signal(int, object)  # (page_idx, TextEditOp)
     annotationAdded = Signal(int, str, object)  # (page_idx, kind, item)
     annotationRemoved = Signal(int, str, object)
+    annotationModified = Signal(int, str, object, str, object, object)  # (page_idx, kind, item, prop, old_val, new_val)
     itemSelected = Signal(object, object)  # (page_widget, item)
     pageInteracted = Signal(int)
 
@@ -527,7 +537,13 @@ class PDFPageWidget(QWidget):
             return
 
         if self._drag_mode:
+            item = self.selected_item
+            orig_rect = self._drag_orig_rect
             self._drag_mode = ""
+            if item is not None and hasattr(item, "rect") and item.rect != orig_rect:
+                kind, _ = self._store_for_overlay_item(item)
+                if kind is not None:
+                    self.annotationModified.emit(self.page_idx, kind, item, "rect", orig_rect, item.rect)
             self.update()
             return
 
@@ -662,18 +678,37 @@ class PDFPageWidget(QWidget):
         if hit is not None:
             self.selected_item = hit
             self.update()
+            kind, _ = self._store_for_overlay_item(hit)
             if isinstance(hit, StampItem):
                 def _rot_stamp(_chk: bool = False, item: StampItem = hit) -> None:
-                    item.rotation = (item.rotation + 90.0) % 360.0
+                    old_rot = item.rotation
+                    new_rot = (item.rotation + 90.0) % 360.0
+                    item.rotation = new_rot
+                    self.annotationModified.emit(self.page_idx, "stamp", item, "rotation", old_rot, new_rot)
                     self.update()
                 menu.addAction("Rotate Overlay 90° CW", _rot_stamp)
+                if hit.kind == "stamp":
+                    def _edit_stamp(_chk: bool = False, item: StampItem = hit) -> None:
+                        txt, ok = QInputDialog.getText(self, "Edit Stamp", "Stamp text:", text=item.text)
+                        if ok and txt.strip() and txt.strip().upper() != item.text:
+                            old_txt = item.text
+                            item.text = txt.strip().upper()
+                            self.annotationModified.emit(self.page_idx, "stamp", item, "text", old_txt, item.text)
+                            self.update()
+                    menu.addAction("Edit Stamp Text...", _edit_stamp)
 
-            def _bring_to_front(_chk: bool = False, item: object = hit) -> None:
+            def _bring_to_front(_chk: bool = False, item: object = hit, k: str | None = kind) -> None:
                 _, lst = self._store_for_overlay_item(item)
                 if lst is not None and item in lst:
-                    lst.remove(item)
-                    lst.append(item)
-                    self.update()
+                    old_idx = lst.index(item)
+                    if old_idx != len(lst) - 1:
+                        lst.remove(item)
+                        lst.append(item)
+                        if k is not None:
+                            self.annotationModified.emit(
+                                self.page_idx, k, item, "z_order", old_idx, len(lst) - 1
+                            )
+                        self.update()
 
             menu.addAction("Bring to Front", _bring_to_front)
             act_del = menu.addAction(
@@ -698,8 +733,18 @@ class PDFPageWidget(QWidget):
         if note is not None:
             def _edit_note(nt: StickyNote = note) -> None:
                 txt, ok = QInputDialog.getMultiLineText(self, "Edit Sticky Note", "Comment:", nt.text)
-                if ok and txt.strip():
+                if ok and txt.strip() and txt.strip() != nt.text:
+                    old_txt = nt.text
                     nt.text = txt.strip()
+                    self.annotationModified.emit(self.page_idx, "note", nt, "text", old_txt, nt.text)
+                    self.update()
+
+            def _note_color(nt: StickyNote = note) -> None:
+                col = QColorDialog.getColor(QColor(nt.color_hex or "#facc15"), self, "Sticky Note Color")
+                if col.isValid() and col.name().lower() != (nt.color_hex or "#facc15").lower():
+                    old_col = nt.color_hex
+                    nt.color_hex = col.name()
+                    self.annotationModified.emit(self.page_idx, "note", nt, "color_hex", old_col, nt.color_hex)
                     self.update()
 
             def _del_note(nt: StickyNote = note) -> None:
@@ -710,6 +755,7 @@ class PDFPageWidget(QWidget):
                     self.update()
 
             menu.addAction("Edit Sticky Note...", _edit_note)
+            menu.addAction("Note Color...", _note_color)
             menu.addAction("Delete Sticky Note", _del_note)
             menu.addSeparator()
 
@@ -732,20 +778,41 @@ class PDFPageWidget(QWidget):
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         px, py = self._to_pdf_pt(event.position())
-        # Check sticky notes
         note = self._find_sticky_note_at(px, py)
         if note is not None:
             txt, ok = QInputDialog.getMultiLineText(self, "Edit Sticky Note", "Comment:", note.text)
-            if ok:
-                note.text = txt.strip() or note.text
+            if ok and txt.strip() and txt.strip() != note.text:
+                old_txt = note.text
+                note.text = txt.strip()
+                self.annotationModified.emit(self.page_idx, "note", note, "text", old_txt, note.text)
                 self.update()
             return
-        # Check removable overlays
         hit, _ = self._hit_overlay_item(px, py)
-        if hit is not None and not getattr(hit, "locked", False):
-            self._remove_overlay_item(hit)
+        if isinstance(hit, StampItem) and hit.kind == "stamp" and not hit.locked:
+            txt, ok = QInputDialog.getText(self, "Edit Stamp", "Stamp text:", text=hit.text)
+            if ok and txt.strip() and txt.strip().upper() != hit.text:
+                old_txt = hit.text
+                hit.text = txt.strip().upper()
+                self.annotationModified.emit(self.page_idx, "stamp", hit, "text", old_txt, hit.text)
+                self.update()
             return
+        if self.active_tool == "select" and hit is None:
+            if self._select_word_at(px, py):
+                return
         super().mouseDoubleClickEvent(event)
+
+    def _select_word_at(self, px: float, py: float) -> bool:
+        doc = self.engine._get_preview_doc()
+        if not (0 <= self.page_idx < len(doc)):
+            return False
+        pt = pymupdf.Point(px, py)
+        for w in doc[self.page_idx].get_text("words"):
+            if pymupdf.Rect(w[:4]).contains(pt):
+                self._selected_quads = [(float(w[0]), float(w[1]), float(w[2]), float(w[3]))]
+                self._selected_text = heal_pdf_text(str(w[4]))
+                self.update()
+                return True
+        return False
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if event.key() in (Qt.Key_Delete, Qt.Key_Backspace) and self.selected_item is not None:
@@ -925,11 +992,29 @@ class PDFPageWidget(QWidget):
                 painter.drawText(local_rect, Qt.AlignCenter, stp.text)
             painter.restore()
 
+        # 8b. Floating rich text boxes (if present)
+        for tb in self.engine.text_boxes.get(self.page_idx, []):
+            wr = self._to_widget_rect(tb.rect)
+            painter.save()
+            painter.translate(wr.topLeft())
+            doc = QTextDocument()
+            doc.setTextWidth(max(20.0, wr.width()))
+            doc.setHtml(
+                qt_html_to_clean_html(
+                    tb.html,
+                    default_font=tb.font_family,
+                    default_size_pt=tb.font_size * self.zoom,
+                    default_color=tb.color_hex,
+                )
+            )
+            doc.drawContents(painter, QRectF(0, 0, wr.width(), wr.height()))
+            painter.restore()
+
         # 9. Sticky note markers
         for nt in self.engine.sticky_notes.get(self.page_idx, []):
             cx, cy = nt.x * self.zoom, nt.y * self.zoom
             marker = QRectF(cx - 10, cy - 10, 20, 20)
-            painter.setBrush(QColor("#facc15"))
+            painter.setBrush(_qcolor(nt.color_hex or "#facc15"))
             painter.setPen(QPen(QColor("#854d0e"), 1.5))
             painter.drawRoundedRect(marker, 4, 4)
             painter.drawText(marker, Qt.AlignCenter, "💬")
