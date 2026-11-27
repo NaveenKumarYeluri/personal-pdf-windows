@@ -688,3 +688,45 @@ def test_organizer_rotate_merge_reorder_and_bookmark_delete(qtbot, tmp_path):
     win.sidebar.bookmarkRemoved.emit(title, pno)
     assert tab.dirty is True
     assert tab.engine.custom_bookmarks == []
+
+
+def test_unsaved_changes_prompt_tab_and_window_close(qtbot, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+
+    pdf_path = tmp_path / "dirty_test.pdf"
+    tab = win.new_blank_pdf()
+    tab.engine.file_path = str(pdf_path)
+    tab.engine.name = pdf_path.name
+    win._set_tab_dirty(tab, True)
+    tab.base_modified = True
+
+    # 1. Cancel aborts closing tab and window
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **kw: QMessageBox.Cancel)
+    win._request_close_tab(0)
+    assert win.tabs.count() == 1
+
+    win._prompt_on_close = True
+    assert win.close() is False
+    assert win.tabs.count() == 1
+
+    # 2. Save persists changes before closing tab cleanly
+    from app.core.models import StickyNote
+
+    tab.engine.sticky_notes[0] = [StickyNote(page_idx=0, x=50, y=50, text="Saved before close")]
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **kw: QMessageBox.Save)
+    win._request_close_tab(0)
+    assert win.tabs.count() == 0
+    assert pdf_path.exists()
+    d = pymupdf.open(str(pdf_path))
+    assert len(list(d[0].annots())) == 1
+    d.close()
+
+    # 3. Discard closes dirty window without saving
+    tab2 = win.new_blank_pdf()
+    win._set_tab_dirty(tab2, True)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **kw: QMessageBox.Discard)
+    assert win.close() is True

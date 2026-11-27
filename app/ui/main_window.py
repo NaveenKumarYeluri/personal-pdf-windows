@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import pymupdf
 import shiboken6
 from PySide6.QtCore import QPoint, QSettings, QSize, Qt
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QImage, QKeySequence, QPainter, QShortcut
+from PySide6.QtGui import QCloseEvent, QDragEnterEvent, QDropEvent, QIcon, QImage, QKeySequence, QPainter, QShortcut
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
     QApplication,
@@ -261,6 +261,7 @@ class MainWindow(QMainWindow):
         self._active_editor: InPlaceTextEditor | None = None
         self._active_editor_page: PDFPageWidget | None = None
         self._right_rail_buttons: list[tuple[QPushButton, str]] = []
+        self._prompt_on_close: bool = False
 
         self._build_ui()
         self._bind_shortcuts()
@@ -304,7 +305,7 @@ class MainWindow(QMainWindow):
 
         # Keep `.tabs` reference pointed to the inline tab bar for clean compatibility
         self.tabs: QTabBar = self.ribbon.inline_tabs
-        self.tabs.tabCloseRequested.connect(self._close_tab)
+        self.tabs.tabCloseRequested.connect(self._request_close_tab)
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self.tabs.tabMoved.connect(self._on_tab_moved)
 
@@ -455,7 +456,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+S"), self, activated=self.save_current_pdf)
         QShortcut(QKeySequence("Ctrl+Shift+S"), self, activated=self.save_as_current_pdf)
         QShortcut(QKeySequence("Ctrl+P"), self, activated=self.print_current_pdf)
-        QShortcut(QKeySequence("Ctrl+W"), self, activated=lambda: self._close_tab(self.tabs.currentIndex()))
+        QShortcut(QKeySequence("Ctrl+W"), self, activated=lambda: self._request_close_tab(self.tabs.currentIndex()))
         QShortcut(QKeySequence("Ctrl+F"), self, activated=lambda: self.ribbon.search_input.setFocus())
         QShortcut(QKeySequence("Ctrl+C"), self, activated=self._shortcut_copy)
         QShortcut(QKeySequence("Ctrl+Z"), self, activated=self._shortcut_undo)
@@ -536,6 +537,8 @@ class MainWindow(QMainWindow):
             with open(path, "rb") as f:
                 data = f.read()
         except OSError as err:
+            if not os.path.isfile(path):
+                self._remove_recent_file(path)
             QMessageBox.critical(self, "Open PDF", f"Could not read file:\n{err}")
             return None
         return self.open_pdf_bytes(data, os.path.basename(path), file_path=path)
@@ -593,6 +596,12 @@ class MainWindow(QMainWindow):
             return
         cur = [p for p in self._load_recent_files() if os.path.normcase(p) != os.path.normcase(norm)]
         updated = [norm] + cur[:7]
+        QSettings("Personal", "Personal PDF Suite").setValue("recentFiles", updated)
+        self.ribbon.update_recent_files(updated)
+
+    def _remove_recent_file(self, path: str) -> None:
+        norm = os.path.normcase(os.path.abspath(path))
+        updated = [p for p in self._load_recent_files() if os.path.normcase(p) != norm]
         QSettings("Personal", "Personal PDF Suite").setValue("recentFiles", updated)
         self.ribbon.update_recent_files(updated)
 
@@ -671,6 +680,36 @@ class MainWindow(QMainWindow):
             tab.zoom_mode if tab.zoom_mode in ("Fit Width", "Fit Page") else f"{int(round(tab.zoom * 100))}%"
         )
         self._update_search_label(tab)
+
+    def _confirm_save_tab(self, tab: DocumentTab) -> bool:
+        """Prompt to save unsaved changes in tab; return True if safe to close."""
+        tab.commit_any_active_editor()
+        if not tab.dirty:
+            return True
+        for i in range(self.tabs.count()):
+            if self.tabs.tabData(i) is tab:
+                self.tabs.setCurrentIndex(i)
+                break
+        res = QMessageBox.question(
+            self,
+            "Unsaved Changes",
+            f'Save changes to "{tab.engine.name}" before closing?',
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save,
+        )
+        if res == QMessageBox.Cancel:
+            return False
+        if res == QMessageBox.Save:
+            return self.save_current_pdf()
+        return True
+
+    def _request_close_tab(self, idx: int) -> None:
+        if idx < 0 or idx >= self.doc_stack.count():
+            return
+        w = self.tabs.tabData(idx)
+        if isinstance(w, DocumentTab) and not self._confirm_save_tab(w):
+            return
+        self._close_tab(idx)
 
     def _close_tab(self, idx: int) -> None:
         if idx < 0 or idx >= self.doc_stack.count():
@@ -1014,10 +1053,14 @@ class MainWindow(QMainWindow):
             tab.page_widgets[tab.current_page].update()
 
         elif action == "insert_image":
-            path, _ = QFileDialog.getOpenFileName(self, "Insert Image", "", "Images (*.png *.jpg *.jpeg)")
+            path, _ = QFileDialog.getOpenFileName(self, "Insert Image", "", "Images (*.png *.jpg *.jpeg *.bmp *.webp)")
             if path:
-                with open(path, "rb") as f:
-                    img_bytes = f.read()
+                try:
+                    with open(path, "rb") as f:
+                        img_bytes = f.read()
+                except OSError as err:
+                    QMessageBox.critical(self, "Insert Image", f"Could not read image:\n{err}")
+                    return
                 self._place_image_overlay(tab, img_bytes, max_w=220.0, max_h=220.0)
 
         elif action == "open_signature":
@@ -1065,15 +1108,18 @@ class MainWindow(QMainWindow):
         elif action == "open_merge":
             dlg = MergeDialog(tab.engine.name, self)
             if dlg.exec():
-                parts = []
-                if dlg.chk_include_current and dlg.chk_include_current.isChecked():
-                    parts.append(tab.engine.build_final_pdf_bytes())
-                for fp in dlg.file_paths:
-                    with open(fp, "rb") as f:
-                        parts.append(f.read())
-                if parts:
-                    merged = merge_pdfs(parts)
-                    self.open_pdf_bytes(merged, "Merged_Document.pdf")
+                try:
+                    parts = []
+                    if dlg.chk_include_current and dlg.chk_include_current.isChecked():
+                        parts.append(tab.engine.build_final_pdf_bytes())
+                    for fp in dlg.file_paths:
+                        with open(fp, "rb") as f:
+                            parts.append(f.read())
+                    if parts:
+                        merged = merge_pdfs(parts)
+                        self.open_pdf_bytes(merged, "Merged_Document.pdf")
+                except Exception as err:
+                    QMessageBox.critical(self, "Combine PDFs", f"Could not merge PDF files:\n{err}")
 
         elif action == "open_split":
             cur_bytes = tab.engine.build_final_pdf_bytes()
@@ -1082,9 +1128,13 @@ class MainWindow(QMainWindow):
                 out_dir = QFileDialog.getExistingDirectory(self, "Select Output Folder for Split PDFs")
                 if not out_dir:
                     return
-                results = split_pdf_by_ranges(cur_bytes, dlg.ranges_input.text(), tab.engine.name)
-                for fname, fbytes in results:
-                    write_bytes_atomic(os.path.join(out_dir, fname), fbytes)
+                try:
+                    results = split_pdf_by_ranges(cur_bytes, dlg.ranges_input.text(), tab.engine.name)
+                    for fname, fbytes in results:
+                        write_bytes_atomic(os.path.join(out_dir, fname), fbytes)
+                except Exception as err:
+                    QMessageBox.critical(self, "Split PDF", f"Could not split PDF:\n{err}")
+                    return
                 QMessageBox.information(
                     self, "Split PDF", f"Saved {len(results)} split PDF file(s) to:\n{out_dir}"
                 )
@@ -1123,13 +1173,17 @@ class MainWindow(QMainWindow):
                     self, "Save Encrypted PDF", f"Protected_{tab.engine.name}", "PDF Files (*.pdf)"
                 )
                 if path:
-                    enc_bytes = encrypt_pdf_aes256(
-                        tab.engine.build_final_pdf_bytes(),
-                        dlg.pw1.text(),
-                        allow_print=dlg.allow_print.isChecked(),
-                        allow_copy=dlg.allow_copy.isChecked(),
-                    )
-                    write_bytes_atomic(path, enc_bytes)
+                    try:
+                        enc_bytes = encrypt_pdf_aes256(
+                            tab.engine.build_final_pdf_bytes(),
+                            dlg.pw1.text(),
+                            allow_print=dlg.allow_print.isChecked(),
+                            allow_copy=dlg.allow_copy.isChecked(),
+                        )
+                        write_bytes_atomic(path, enc_bytes)
+                    except Exception as err:
+                        QMessageBox.critical(self, "Encrypt PDF", f"Could not save encrypted PDF:\n{err}")
+                        return
                     self.status_bar.showMessage(f"Saved AES-256 encrypted PDF: {path}")
 
         elif action == "open_word_flow":
@@ -1160,18 +1214,26 @@ class MainWindow(QMainWindow):
                 self, "Export Page as PNG", f"page_{tab.current_page + 1}.png", "PNG Image (*.png)"
             )
             if path:
-                write_bytes_atomic(path, export_page_image(cur_bytes, tab.current_page, dpi=200, fmt="png"))
+                try:
+                    write_bytes_atomic(path, export_page_image(cur_bytes, tab.current_page, dpi=200, fmt="png"))
+                except Exception as err:
+                    QMessageBox.critical(self, "Export Page", f"Could not export PNG:\n{err}")
+                    return
                 self.status_bar.showMessage(f"Exported page {tab.current_page + 1} to {path}")
 
         elif action == "export_all_png":
             out_dir = QFileDialog.getExistingDirectory(self, "Select Output Folder for Page Images")
             if out_dir:
                 cur_bytes = tab.engine.build_final_pdf_bytes()
-                for pno in range(tab.engine.page_count):
-                    write_bytes_atomic(
-                        os.path.join(out_dir, f"page_{pno + 1}.png"),
-                        export_page_image(cur_bytes, pno, dpi=200, fmt="png"),
-                    )
+                try:
+                    for pno in range(tab.engine.page_count):
+                        write_bytes_atomic(
+                            os.path.join(out_dir, f"page_{pno + 1}.png"),
+                            export_page_image(cur_bytes, pno, dpi=200, fmt="png"),
+                        )
+                except Exception as err:
+                    QMessageBox.critical(self, "Export Pages", f"Could not export PNG images:\n{err}")
+                    return
                 QMessageBox.information(self, "Export Complete", f"Exported {tab.engine.page_count} PNG file(s).")
 
         elif action == "export_text":
@@ -1179,7 +1241,11 @@ class MainWindow(QMainWindow):
             base = os.path.splitext(tab.engine.name)[0]
             path, _ = QFileDialog.getSaveFileName(self, "Export Text", f"{base}.txt", "Text Files (*.txt)")
             if path:
-                write_bytes_atomic(path, extract_clean_text(cur_bytes).encode("utf-8"))
+                try:
+                    write_bytes_atomic(path, extract_clean_text(cur_bytes).encode("utf-8"))
+                except Exception as err:
+                    QMessageBox.critical(self, "Export Text", f"Could not export text:\n{err}")
+                    return
                 self.status_bar.showMessage(f"Extracted clean text to {path}")
 
     def _place_image_overlay(
@@ -1219,13 +1285,26 @@ class MainWindow(QMainWindow):
         old_path = tab.engine.file_path
         old_name = tab.engine.name
         tab.engine = PDFDocumentEngine(new_bytes, name=old_name, file_path=old_path)
+        tab.current_page = min(tab.current_page, max(0, tab.engine.page_count - 1))
         tab.undo_stack.clear()
         tab.redo_stack.clear()
         tab.base_modified = mark_dirty
         self._set_tab_dirty(tab, mark_dirty)
+        for i in range(self.tabs.count()):
+            if self.tabs.tabData(i) is tab:
+                self.tabs.setTabToolTip(i, old_path or old_name)
+                break
         self._rebuild_tab_pages(tab)
         if tab is self.current_tab():
-            self.sidebar.set_engine(tab.engine, min(tab.current_page, max(0, tab.engine.page_count - 1)))
+            self.sidebar.set_engine(tab.engine, tab.current_page)
+            query = self.ribbon.search_input.text().strip()
+            if query:
+                self.run_search(query)
+            else:
+                tab.search_hits = []
+                tab.search_idx = -1
+                tab._apply_search_highlights()
+                self._update_search_label(tab)
 
     def open_metadata_dialog(self) -> None:
         tab = self.current_tab()
@@ -1246,37 +1325,46 @@ class MainWindow(QMainWindow):
             )
             self._replace_tab_document(tab, new_bytes)
 
-    def save_current_pdf(self) -> None:
+    def save_current_pdf(self) -> bool:
         tab = self.current_tab()
         if not tab:
-            return
+            return False
         tab.commit_any_active_editor()
         if not tab.engine.file_path:
-            self.save_as_current_pdf()
-            return
-        out_bytes = tab.engine.build_final_pdf_bytes()
-        write_bytes_atomic(tab.engine.file_path, out_bytes)
+            return self.save_as_current_pdf()
+        try:
+            out_bytes = tab.engine.build_final_pdf_bytes()
+            write_bytes_atomic(tab.engine.file_path, out_bytes)
+        except OSError as err:
+            QMessageBox.critical(self, "Save PDF", f"Could not save file:\n{err}")
+            return False
         self._replace_tab_document(tab, out_bytes, mark_dirty=False)
         self.status_bar.showMessage(f"Saved {tab.engine.file_path}")
+        return True
 
-    def save_as_current_pdf(self) -> None:
+    def save_as_current_pdf(self) -> bool:
         tab = self.current_tab()
         if not tab:
-            return
+            return False
         tab.commit_any_active_editor()
         suggested = tab.engine.file_path or tab.engine.name
         path, _ = QFileDialog.getSaveFileName(self, "Save PDF As", suggested, "PDF Files (*.pdf)")
         if not path:
-            return
+            return False
         if not path.lower().endswith(".pdf"):
             path += ".pdf"
-        out_bytes = tab.engine.build_final_pdf_bytes()
-        write_bytes_atomic(path, out_bytes)
+        try:
+            out_bytes = tab.engine.build_final_pdf_bytes()
+            write_bytes_atomic(path, out_bytes)
+        except OSError as err:
+            QMessageBox.critical(self, "Save PDF As", f"Could not save file:\n{err}")
+            return False
         tab.engine.file_path = path
         tab.engine.name = os.path.basename(path)
         self._replace_tab_document(tab, out_bytes, mark_dirty=False)
         self._record_recent_file(path)
         self.status_bar.showMessage(f"Saved as {path}")
+        return True
 
     def print_current_pdf(self) -> None:
         tab = self.current_tab()
@@ -1377,6 +1465,15 @@ class MainWindow(QMainWindow):
         total = len(tab.search_hits)
         cur = (tab.search_idx + 1) if total > 0 and tab.search_idx >= 0 else 0
         self.ribbon.lbl_search_count.setText(f"{cur}/{total}")
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if event.spontaneous() or self._prompt_on_close:
+            for i in range(self.doc_stack.count()):
+                w = self.doc_stack.widget(i)
+                if isinstance(w, DocumentTab) and not self._confirm_save_tab(w):
+                    event.ignore()
+                    return
+        super().closeEvent(event)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
