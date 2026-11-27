@@ -643,3 +643,48 @@ def test_canvas_context_menu_and_sticky_note_hover(qtbot, monkeypatch):
     assert len(tab.engine.sticky_notes[0]) == 0
     win.undo()
     assert len(tab.engine.sticky_notes[0]) == 1
+
+
+def test_organizer_rotate_merge_reorder_and_bookmark_delete(qtbot, tmp_path):
+    from app.core.pdf_engine import create_sample_pdf_bytes
+    from app.ui.dialogs import MergeDialog, OrganizerDialog
+
+    sample = create_sample_pdf_bytes()
+    org = OrganizerDialog(sample)
+    qtbot.addWidget(org)
+    item0 = org.grid.item(0)
+    pm_before = item0.icon().pixmap(130, 170)
+    assert pm_before.height() > pm_before.width()
+    item0.setSelected(True)
+    org._rotate(90)
+    pm_after = item0.icon().pixmap(130, 170)
+    assert pm_after.width() > pm_after.height()
+
+    p1 = tmp_path / "one.pdf"
+    p2 = tmp_path / "two.pdf"
+    p1.write_bytes(sample)
+    p2.write_bytes(sample)
+    md = MergeDialog(current_name=None)
+    qtbot.addWidget(md)
+    md.file_paths = [str(p1), str(p2)]
+    md.list_widget.addItems(md.file_paths)
+    md.list_widget.setCurrentRow(1)
+    md._move(-1)
+    assert md.file_paths == [str(p2), str(p1)]
+    md.list_widget.setCurrentRow(0)
+    md._remove_selected()
+    assert md.file_paths == [str(p1)]
+
+    # Custom bookmark deletion via SidebarPanel
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+    tab = win.open_pdf_bytes(sample, "bm.pdf")
+    tab.engine.custom_bookmarks.append(("Chapter 1", 0))
+    win.sidebar.refresh_outline()
+    assert len(tab.engine.custom_bookmarks) == 1
+    title, pno = tab.engine.custom_bookmarks.pop(0)
+    win.sidebar.refresh_outline()
+    win.sidebar.bookmarkRemoved.emit(title, pno)
+    assert tab.dirty is True
+    assert tab.engine.custom_bookmarks == []

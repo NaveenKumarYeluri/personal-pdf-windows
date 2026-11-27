@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QPoint, QSize, Qt, Signal
 from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPushButton,
     QTabWidget,
     QVBoxLayout,
@@ -24,6 +25,7 @@ class SidebarPanel(QFrame):
 
     pageSelected = Signal(int)
     bookmarkAdded = Signal(str, int)
+    bookmarkRemoved = Signal(str, int)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -59,6 +61,8 @@ class SidebarPanel(QFrame):
         ov.addLayout(oh)
         self.outline_list = QListWidget()
         self.outline_list.itemClicked.connect(self._on_outline_clicked)
+        self.outline_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.outline_list.customContextMenuRequested.connect(self._on_outline_context_menu)
         ov.addWidget(self.outline_list)
         self.tabs.addTab(outline_wrap, "Outline")
 
@@ -121,9 +125,10 @@ class SidebarPanel(QFrame):
         self.outline_list.clear()
         if self._engine is None or self._engine.needs_password:
             return
-        for title, pno in self._engine.custom_bookmarks:
+        for idx, (title, pno) in enumerate(self._engine.custom_bookmarks):
             item = QListWidgetItem(f"🔖 {title} (p.{pno + 1})")
             item.setData(Qt.UserRole, pno)
+            item.setData(Qt.UserRole + 1, idx)
             self.outline_list.addItem(item)
         for lvl, title, pno in self._engine.get_toc():
             indent = "  " * max(0, lvl - 1)
@@ -206,3 +211,19 @@ class SidebarPanel(QFrame):
             self._engine.custom_bookmarks.append((title.strip(), self._current_page))
             self.refresh_outline()
             self.bookmarkAdded.emit(title.strip(), self._current_page)
+
+    def _on_outline_context_menu(self, pos: QPoint) -> None:
+        if self._engine is None:
+            return
+        item = self.outline_list.itemAt(pos)
+        if item is None:
+            return
+        bm_idx = item.data(Qt.UserRole + 1)
+        if not isinstance(bm_idx, int) or not (0 <= bm_idx < len(self._engine.custom_bookmarks)):
+            return
+        menu = QMenu(self)
+        act_del = menu.addAction("Delete Bookmark")
+        if menu.exec(self.outline_list.mapToGlobal(pos)) is act_del:
+            title, pno = self._engine.custom_bookmarks.pop(bm_idx)
+            self.refresh_outline()
+            self.bookmarkRemoved.emit(title, pno)

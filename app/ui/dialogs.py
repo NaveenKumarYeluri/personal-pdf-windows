@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import io
 from PySide6.QtCore import QPoint, QSize, Qt
-from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.document_ops import PageOp, parse_page_ranges
+from app.core.fonts import available_ui_fonts
 from app.core.pdf_engine import PDFDocumentEngine
 from app.core.signature import extract_signature_ink_bytes, render_typed_signature_png
 
@@ -87,8 +88,10 @@ class OrganizerDialog(QDialog):
         for pno in range(self._engine.page_count):
             samples, w, h = self._engine.render_thumbnail_rgba(pno, max_width=130)
             qimg = QImage(samples, w, h, w * 4, QImage.Format_RGBA8888).copy()
-            item = QListWidgetItem(QIcon(QPixmap.fromImage(qimg)), f"Page {pno + 1}")
+            pm = QPixmap.fromImage(qimg)
+            item = QListWidgetItem(QIcon(pm), f"Page {pno + 1}")
             item.setData(Qt.UserRole, {"orig_idx": pno, "rot": 0})
+            item.setData(Qt.UserRole + 1, pm)
             self.grid.addItem(item)
 
     def _selected_rows(self) -> list[int]:
@@ -117,6 +120,10 @@ class OrganizerDialog(QDialog):
             data = dict(it.data(Qt.UserRole))
             data["rot"] = (data["rot"] + delta) % 360
             it.setData(Qt.UserRole, data)
+            orig_pm = it.data(Qt.UserRole + 1)
+            if isinstance(orig_pm, QPixmap) and not orig_pm.isNull():
+                rot_pm = orig_pm.transformed(QTransform().rotate(data["rot"]), Qt.SmoothTransformation)
+                it.setIcon(QIcon(rot_pm.scaled(130, 170, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
             base_lbl = f"Page {data['orig_idx'] + 1}" if data["orig_idx"] is not None else "Blank Page"
             suffix = f" ({data['rot']}°)" if data["rot"] else ""
             it.setText(base_lbl + suffix)
@@ -126,6 +133,7 @@ class OrganizerDialog(QDialog):
             src = self.grid.item(r)
             clone = QListWidgetItem(src.icon(), src.text() + " (Copy)")
             clone.setData(Qt.UserRole, dict(src.data(Qt.UserRole)))
+            clone.setData(Qt.UserRole + 1, src.data(Qt.UserRole + 1))
             self.grid.insertItem(r + 1, clone)
 
     def _insert_blank(self) -> None:
@@ -135,6 +143,7 @@ class OrganizerDialog(QDialog):
         pm.fill(Qt.white)
         it = QListWidgetItem(QIcon(pm), "Blank Page")
         it.setData(Qt.UserRole, {"orig_idx": None, "rot": 0})
+        it.setData(Qt.UserRole + 1, pm)
         self.grid.insertItem(insert_at, it)
 
     def _delete(self) -> None:
@@ -318,22 +327,39 @@ class SignatureDialog(QDialog):
 
     def _pick_image(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select Signature Image", "", "Images (*.png *.jpg *.jpeg)"
+            self, "Select Signature Image", "", "Images (*.png *.jpg *.jpeg *.bmp *.webp)"
         )
         if not path:
             return
-        with open(path, "rb") as f:
-            self._raw_upload_bytes = f.read()
-        self._refresh_upload_preview()
+        try:
+            with open(path, "rb") as f:
+                raw = f.read()
+            png = extract_signature_ink_bytes(
+                raw,
+                remove_bg=self.chk_rm_bg.isChecked(),
+                threshold=self.slider_thresh.value(),
+            )
+        except Exception as err:
+            QMessageBox.warning(self, "Signature Image", f"Could not load image:\n{err}")
+            return
+        self._raw_upload_bytes = raw
+        self._display_upload_png(png)
 
     def _refresh_upload_preview(self) -> None:
         if not self._raw_upload_bytes:
             return
-        png = extract_signature_ink_bytes(
-            self._raw_upload_bytes,
-            remove_bg=self.chk_rm_bg.isChecked(),
-            threshold=self.slider_thresh.value(),
-        )
+        try:
+            png = extract_signature_ink_bytes(
+                self._raw_upload_bytes,
+                remove_bg=self.chk_rm_bg.isChecked(),
+                threshold=self.slider_thresh.value(),
+            )
+        except Exception as err:
+            QMessageBox.warning(self, "Signature Image", f"Could not process image:\n{err}")
+            return
+        self._display_upload_png(png)
+
+    def _display_upload_png(self, png: bytes) -> None:
         self._processed_upload_png = png
         pm = QPixmap()
         pm.loadFromData(png, "PNG")
@@ -455,7 +481,7 @@ class MergeDialog(QDialog):
     def __init__(self, current_name: str | None = None, parent: QWidget | None = None):
         super().__init__(parent)
         self.setWindowTitle("Combine & Merge PDFs")
-        self.resize(480, 340)
+        self.resize(520, 380)
         self.file_paths: list[str] = []
 
         root = QVBoxLayout(self)
@@ -466,16 +492,25 @@ class MergeDialog(QDialog):
         else:
             self.chk_include_current = None
 
+        bar = QHBoxLayout()
         btn_add = QPushButton("+ Add PDF Files...")
         btn_add.clicked.connect(self._add_files)
-        root.addWidget(btn_add)
+        btn_up = QPushButton("▲ Move Up")
+        btn_up.clicked.connect(lambda: self._move(-1))
+        btn_down = QPushButton("▼ Move Down")
+        btn_down.clicked.connect(lambda: self._move(1))
+        btn_rm = QPushButton("✕ Remove")
+        btn_rm.clicked.connect(self._remove_selected)
+        for b in (btn_add, btn_up, btn_down, btn_rm):
+            bar.addWidget(b)
+        root.addLayout(bar)
 
         self.list_widget = QListWidget()
         root.addWidget(self.list_widget)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.button(QDialogButtonBox.Ok).setText("Merge PDFs")
-        btns.accepted.connect(self.accept)
+        btns.accepted.connect(self._validate_and_accept)
         btns.rejected.connect(self.reject)
         root.addWidget(btns)
 
@@ -484,6 +519,31 @@ class MergeDialog(QDialog):
         for p in paths:
             self.file_paths.append(p)
             self.list_widget.addItem(p)
+
+    def _move(self, delta: int) -> None:
+        row = self.list_widget.currentRow()
+        target = row + delta
+        if row < 0 or not (0 <= target < self.list_widget.count()):
+            return
+        it = self.list_widget.takeItem(row)
+        self.list_widget.insertItem(target, it)
+        self.list_widget.setCurrentRow(target)
+        path = self.file_paths.pop(row)
+        self.file_paths.insert(target, path)
+
+    def _remove_selected(self) -> None:
+        row = self.list_widget.currentRow()
+        if row < 0:
+            return
+        self.list_widget.takeItem(row)
+        self.file_paths.pop(row)
+
+    def _validate_and_accept(self) -> None:
+        has_current = bool(self.chk_include_current and self.chk_include_current.isChecked())
+        if not has_current and not self.file_paths:
+            QMessageBox.warning(self, "Combine PDFs", "Please include or add at least one PDF document to merge.")
+            return
+        self.accept()
 
 
 class ProtectDialog(QDialog):
@@ -554,17 +614,24 @@ class WordFlowDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Word-Flow Document Editor (Continuous Multi-Page Reflow)")
         self.resize(860, 680)
+        self._syncing = False
         root = QVBoxLayout(self)
 
         bar = QHBoxLayout()
+        self.font_combo = QComboBox()
+        self.font_combo.addItems(available_ui_fonts())
+        self.font_combo.currentTextChanged.connect(self._set_font_family)
         self.btn_bold = QPushButton("B")
         self.btn_bold.setCheckable(True)
+        self.btn_bold.setStyleSheet("font-weight:bold;")
         self.btn_bold.clicked.connect(self._toggle_bold)
         self.btn_italic = QPushButton("I")
         self.btn_italic.setCheckable(True)
+        self.btn_italic.setStyleSheet("font-style:italic;")
         self.btn_italic.clicked.connect(self._toggle_italic)
         self.btn_under = QPushButton("U")
         self.btn_under.setCheckable(True)
+        self.btn_under.setStyleSheet("text-decoration:underline;")
         self.btn_under.clicked.connect(self._toggle_under)
         self.size_spin = QSpinBox()
         self.size_spin.setRange(8, 72)
@@ -572,16 +639,34 @@ class WordFlowDialog(QDialog):
         self.size_spin.valueChanged.connect(self._set_size)
         self.btn_col = QPushButton("Color")
         self.btn_col.clicked.connect(self._pick_color)
-        bar.addWidget(self.btn_bold)
-        bar.addWidget(self.btn_italic)
-        bar.addWidget(self.btn_under)
-        bar.addWidget(self.size_spin)
-        bar.addWidget(self.btn_col)
+        self.btn_align_l = QPushButton("L")
+        self.btn_align_l.setToolTip("Align Left")
+        self.btn_align_l.clicked.connect(lambda: self.editor.setAlignment(Qt.AlignLeft))
+        self.btn_align_c = QPushButton("C")
+        self.btn_align_c.setToolTip("Align Center")
+        self.btn_align_c.clicked.connect(lambda: self.editor.setAlignment(Qt.AlignHCenter))
+        self.btn_align_r = QPushButton("R")
+        self.btn_align_r.setToolTip("Align Right")
+        self.btn_align_r.clicked.connect(lambda: self.editor.setAlignment(Qt.AlignRight))
+        for w in (
+            self.font_combo,
+            self.btn_bold,
+            self.btn_italic,
+            self.btn_under,
+            self.size_spin,
+            self.btn_col,
+            self.btn_align_l,
+            self.btn_align_c,
+            self.btn_align_r,
+        ):
+            bar.addWidget(w)
         bar.addStretch()
         root.addLayout(bar)
 
         self.editor = QTextEdit()
         self.editor.setHtml(initial_html)
+        self.editor.currentCharFormatChanged.connect(self._sync_toolbar)
+        self.editor.cursorPositionChanged.connect(self._sync_toolbar)
         root.addWidget(self.editor, stretch=1)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -589,23 +674,50 @@ class WordFlowDialog(QDialog):
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         root.addWidget(btns)
+        self._sync_toolbar()
+
+    def _set_font_family(self, family: str) -> None:
+        if not self._syncing and family:
+            self.editor.setFontFamily(family)
 
     def _toggle_bold(self, checked: bool) -> None:
-        self.editor.setFontWeight(QFont.Bold if checked else QFont.Normal)
+        if not self._syncing:
+            self.editor.setFontWeight(QFont.Bold if checked else QFont.Normal)
 
     def _toggle_italic(self, checked: bool) -> None:
-        self.editor.setFontItalic(checked)
+        if not self._syncing:
+            self.editor.setFontItalic(checked)
 
     def _toggle_under(self, checked: bool) -> None:
-        self.editor.setFontUnderline(checked)
+        if not self._syncing:
+            self.editor.setFontUnderline(checked)
 
     def _set_size(self, sz: int) -> None:
-        self.editor.setFontPointSize(float(sz))
+        if not self._syncing:
+            self.editor.setFontPointSize(float(sz))
 
     def _pick_color(self) -> None:
-        c = QColorDialog.getColor(QColor("#000000"), self, "Text Color")
+        c = QColorDialog.getColor(self.editor.textColor(), self, "Text Color")
         if c.isValid():
             self.editor.setTextColor(c)
+
+    def _sync_toolbar(self, *_args) -> None:
+        self._syncing = True
+        try:
+            fmt = self.editor.currentCharFormat()
+            fams = fmt.fontFamilies()
+            fam = fams[0] if fams else fmt.font().family()
+            idx = self.font_combo.findText(fam, Qt.MatchFixedString)
+            if idx >= 0:
+                self.font_combo.setCurrentIndex(idx)
+            pt = fmt.fontPointSize()
+            if pt >= 8:
+                self.size_spin.setValue(int(round(pt)))
+            self.btn_bold.setChecked(fmt.fontWeight() >= QFont.Bold)
+            self.btn_italic.setChecked(fmt.fontItalic())
+            self.btn_under.setChecked(fmt.fontUnderline())
+        finally:
+            self._syncing = False
 
     def get_html(self) -> str:
         return self.editor.toHtml()

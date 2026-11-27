@@ -366,6 +366,7 @@ class MainWindow(QMainWindow):
 
         self.sidebar.pageSelected.connect(self.go_to_page)
         self.sidebar.bookmarkAdded.connect(self._on_bookmark_added)
+        self.sidebar.bookmarkRemoved.connect(self._on_bookmark_removed)
 
     def _build_right_nav_rail(self) -> QFrame:
         rail = QFrame()
@@ -609,6 +610,13 @@ class MainWindow(QMainWindow):
             tab.base_modified = True
             self._set_tab_dirty(tab, True)
         self.status_bar.showMessage(f"Bookmark added: {title} (Page {page_idx + 1})")
+
+    def _on_bookmark_removed(self, title: str, page_idx: int) -> None:
+        tab = self.current_tab()
+        if tab is not None:
+            tab.base_modified = True
+            self._set_tab_dirty(tab, True)
+        self.status_bar.showMessage(f"Bookmark removed: {title} (Page {page_idx + 1})")
 
     def _callbacks_for(self, tab: DocumentTab) -> dict:
         return {
