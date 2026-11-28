@@ -122,9 +122,10 @@ class PDFPageWidget(QWidget):
 
         # Selected overlay object (stamp, whiteout, redaction, floating textbox)
         self.selected_item: object | None = None
-        self._drag_mode: str = ""  # "move" or "resize"
+        self._drag_mode: str = ""  # "move", "resize", "move_note", or "move_shape"
         self._drag_start_pt: tuple[float, float] = (0.0, 0.0)
         self._drag_orig_rect: tuple[float, float, float, float] = (0, 0, 0, 0)
+        self._drag_orig_pos: tuple[float, float] = (0.0, 0.0)
         self._panning: bool = False
         self._pan_last_global: QPointF | None = None
         self._stamp_pixmap_cache: dict[tuple[str, int], QPixmap] = {}
@@ -323,6 +324,65 @@ class PDFPageWidget(QWidget):
                 return item, "move"
         return None, ""
 
+    @staticmethod
+    def _dist_to_segment(px: float, py: float, x0: float, y0: float, x1: float, y1: float) -> float:
+        dx, dy = x1 - x0, y1 - y0
+        seg_len_sq = dx * dx + dy * dy
+        if seg_len_sq <= 1e-6:
+            return math.hypot(px - x0, py - y0)
+        t = max(0.0, min(1.0, ((px - x0) * dx + (py - y0) * dy) / seg_len_sq))
+        return math.hypot(px - (x0 + t * dx), py - (y0 + t * dy))
+
+    def _hit_vector_annotation(self, px: float, py: float) -> tuple[object | None, str]:
+        """Return (annotation, mode) for shapes, ink strokes, or text markups."""
+        for sh in reversed(self.engine.shapes.get(self.page_idx, [])):
+            tol = max(6.0 / max(0.25, self.zoom), sh.stroke_width + 4.0)
+            r = sh.rect
+            if sh.shape_type in ("line", "arrow"):
+                if self._dist_to_segment(px, py, r[0], r[1], r[2], r[3]) <= tol:
+                    return sh, "move_shape"
+            else:
+                x0, y0 = min(r[0], r[2]), min(r[1], r[3])
+                x1, y1 = max(r[0], r[2]), max(r[1], r[3])
+                if (x0 - tol) <= px <= (x1 + tol) and (y0 - tol) <= py <= (y1 + tol):
+                    on_h_edge = abs(px - x0) <= tol or abs(px - x1) <= tol
+                    on_v_edge = abs(py - y0) <= tol or abs(py - y1) <= tol
+                    if sh.shape_type == "ellipse" or on_h_edge or on_v_edge:
+                        return sh, "move_shape"
+
+        for st in reversed(self.engine.ink_strokes.get(self.page_idx, [])):
+            tol = max(6.0 / max(0.25, self.zoom), st.stroke_width + 4.0)
+            pts = st.points
+            for i in range(1, len(pts)):
+                if self._dist_to_segment(px, py, pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1]) <= tol:
+                    return st, "select_only"
+
+        for mk in reversed(self.engine.markups.get(self.page_idx, [])):
+            if any(r[0] <= px <= r[2] and r[1] <= py <= r[3] for r in mk.rects):
+                return mk, "select_only"
+        return None, ""
+
+    @staticmethod
+    def _annotation_bounds(item: object) -> tuple[float, float, float, float] | None:
+        if isinstance(item, StickyNote):
+            return (item.x - 12.0, item.y - 12.0, item.x + 12.0, item.y + 12.0)
+        if isinstance(item, InkStroke) and item.points:
+            xs = [p[0] for p in item.points]
+            ys = [p[1] for p in item.points]
+            pad = max(3.0, item.stroke_width / 2.0)
+            return (min(xs) - pad, min(ys) - pad, max(xs) + pad, max(ys) + pad)
+        if isinstance(item, TextMarkup) and item.rects:
+            return (
+                min(r[0] for r in item.rects),
+                min(r[1] for r in item.rects),
+                max(r[2] for r in item.rects),
+                max(r[3] for r in item.rects),
+            )
+        if hasattr(item, "rect"):
+            r = item.rect
+            return (min(r[0], r[2]), min(r[1], r[3]), max(r[0], r[2]), max(r[1], r[3]))
+        return None
+
     def open_editor_for_block(self, blk: TextBlock, is_new: bool = False) -> InPlaceTextEditor:
         """Open a native QTextEdit directly over blk."""
         if self.active_editor is not None:
@@ -489,10 +549,39 @@ class PDFPageWidget(QWidget):
                     self._drag_orig_rect = hit.rect
                 self.update()
                 return
-            elif self.selected_item is not None:
-                self.selected_item = None
-                self.itemSelected.emit(self, None)
+
+        if self.active_tool in ("select", "note", "edit_text", "move"):
+            note = self._find_sticky_note_at(px, py)
+            if note is not None:
+                self.selected_item = note
+                self.itemSelected.emit(self, note)
+                self._drag_mode = "move_note"
+                self._drag_start_pt = (px, py)
+                self._drag_orig_pos = note.pos
                 self.update()
+                return
+
+        if self.active_tool == "select":
+            fw = self.engine.find_form_widget_at(self.page_idx, px, py)
+            if fw is not None and not fw["is_readonly"]:
+                self._activate_form_widget(fw)
+                return
+            if self.engine.find_link_at(self.page_idx, px, py) is None:
+                vhit, vmode = self._hit_vector_annotation(px, py)
+                if vhit is not None:
+                    self.selected_item = vhit
+                    self.itemSelected.emit(self, vhit)
+                    if vmode == "move_shape":
+                        self._drag_mode = "move_shape"
+                        self._drag_start_pt = (px, py)
+                        self._drag_orig_rect = vhit.rect
+                    self.update()
+                    return
+
+        if self.selected_item is not None and self.active_tool in ("select", "edit_text", "move", "stamp", "whiteout", "redact", "note"):
+            self.selected_item = None
+            self.itemSelected.emit(self, None)
+            self.update()
 
         if self.active_tool == "edit_text":
             blk = self.engine.find_block_at(self.page_idx, px, py)
@@ -528,12 +617,6 @@ class PDFPageWidget(QWidget):
             self._erase_at(px, py)
             return
 
-        if self.active_tool == "select":
-            fw = self.engine.find_form_widget_at(self.page_idx, px, py)
-            if fw is not None and not fw["is_readonly"]:
-                self._activate_form_widget(fw)
-                return
-
         if self.active_tool in ("select", "underline", "strikethrough", "highlight_sel"):
             self._sel_start = (px, py)
             self._sel_cur = (px, py)
@@ -563,12 +646,24 @@ class PDFPageWidget(QWidget):
         if self._drag_mode and self.selected_item is not None:
             dx = px - self._drag_start_pt[0]
             dy = py - self._drag_start_pt[1]
+            if self._drag_mode == "move_note" and isinstance(self.selected_item, StickyNote):
+                nx = max(12.0, min(self._page_w_pt - 12.0, self._drag_orig_pos[0] + dx))
+                ny = max(12.0, min(self._page_h_pt - 12.0, self._drag_orig_pos[1] + dy))
+                self.selected_item.pos = (nx, ny)
+                self.update()
+                return
             ox0, oy0, ox1, oy1 = self._drag_orig_rect
-            if self._drag_mode == "move":
-                w, h = ox1 - ox0, oy1 - oy0
-                nx0 = max(0.0, min(self._page_w_pt - w, ox0 + dx))
-                ny0 = max(0.0, min(self._page_h_pt - h, oy0 + dy))
-                self.selected_item.rect = (nx0, ny0, nx0 + w, ny0 + h)
+            if self._drag_mode in ("move", "move_shape"):
+                min_x, max_x = min(ox0, ox1), max(ox0, ox1)
+                min_y, max_y = min(oy0, oy1), max(oy0, oy1)
+                dx_clamped = max(-min_x, min(self._page_w_pt - max_x, dx))
+                dy_clamped = max(-min_y, min(self._page_h_pt - max_y, dy))
+                self.selected_item.rect = (
+                    ox0 + dx_clamped,
+                    oy0 + dy_clamped,
+                    ox1 + dx_clamped,
+                    oy1 + dy_clamped,
+                )
             elif self._drag_mode == "resize":
                 nx1 = max(ox0 + 20.0, min(self._page_w_pt, ox1 + dx))
                 ny1 = max(oy0 + 16.0, min(self._page_h_pt, oy1 + dy))
@@ -647,9 +742,13 @@ class PDFPageWidget(QWidget):
 
         if self._drag_mode:
             item = self.selected_item
+            drag_mode = self._drag_mode
             orig_rect = self._drag_orig_rect
+            orig_pos = self._drag_orig_pos
             self._drag_mode = ""
-            if item is not None and hasattr(item, "rect") and item.rect != orig_rect:
+            if drag_mode == "move_note" and isinstance(item, StickyNote) and item.pos != orig_pos:
+                self.annotationModified.emit(self.page_idx, "note", item, "pos", orig_pos, item.pos)
+            elif item is not None and hasattr(item, "rect") and item.rect != orig_rect:
                 kind, _ = self._store_for_overlay_item(item)
                 if kind is not None:
                     self.annotationModified.emit(self.page_idx, kind, item, "rect", orig_rect, item.rect)
@@ -776,6 +875,10 @@ class PDFPageWidget(QWidget):
             ("textbox", self.engine.text_boxes),
             ("whiteout", self.engine.whiteouts),
             ("redact", self.engine.redactions),
+            ("shape", self.engine.shapes),
+            ("ink", self.engine.ink_strokes),
+            ("markup", self.engine.markups),
+            ("note", self.engine.sticky_notes),
         ]:
             lst = store.get(self.page_idx, [])
             if item in lst:
@@ -816,6 +919,17 @@ class PDFPageWidget(QWidget):
                             self.annotationModified.emit(self.page_idx, "stamp", item, "text", old_txt, item.text)
                             self.update()
                     menu.addAction("Edit Stamp Text...", _edit_stamp)
+
+                    def _stamp_color(_chk: bool = False, item: StampItem = hit) -> None:
+                        col = QColorDialog.getColor(QColor(item.color_hex or "#dc2626"), self, "Stamp Color")
+                        if col.isValid() and col.name().lower() != (item.color_hex or "#dc2626").lower():
+                            old_col = item.color_hex
+                            item.color_hex = col.name()
+                            self.annotationModified.emit(
+                                self.page_idx, "stamp", item, "color_hex", old_col, item.color_hex
+                            )
+                            self.update()
+                    menu.addAction("Stamp Color...", _stamp_color)
 
             def _bring_to_front(_chk: bool = False, item: object = hit, k: str | None = kind) -> None:
                 _, lst = self._store_for_overlay_item(item)
@@ -878,6 +992,28 @@ class PDFPageWidget(QWidget):
             menu.addAction("Note Color...", _note_color)
             menu.addAction("Delete Sticky Note", _del_note)
             menu.addSeparator()
+
+        if hit is None and note is None:
+            vhit, _ = self._hit_vector_annotation(px, py)
+            if vhit is not None:
+                self.selected_item = vhit
+                self.update()
+                vkind, _ = self._store_for_overlay_item(vhit)
+                if vkind is not None and hasattr(vhit, "color_hex"):
+                    def _recolor(_chk: bool = False, item: object = vhit, k: str = vkind) -> None:
+                        col = QColorDialog.getColor(QColor(item.color_hex or "#ef4444"), self, "Annotation Color")
+                        if col.isValid() and col.name().lower() != (item.color_hex or "").lower():
+                            old_col = item.color_hex
+                            item.color_hex = col.name()
+                            self.annotationModified.emit(self.page_idx, k, item, "color_hex", old_col, item.color_hex)
+                            self.update()
+
+                    menu.addAction("Change Color...", _recolor)
+                menu.addAction(
+                    "Delete Annotation",
+                    lambda _chk=False, item=vhit: self._remove_overlay_item(item),
+                )
+                menu.addSeparator()
 
         def _add_note() -> None:
             txt, ok = QInputDialog.getMultiLineText(self, "Sticky Note", "Comment text:")
@@ -1037,6 +1173,12 @@ class PDFPageWidget(QWidget):
             if not getattr(self.selected_item, "locked", False):
                 self._remove_overlay_item(self.selected_item)
                 return
+        if event.key() == Qt.Key_Escape and (self.selected_item is not None or self._selected_quads):
+            self.selected_item = None
+            self.itemSelected.emit(self, None)
+            self.clear_text_selection()
+            self.update()
+            return
         super().keyPressEvent(event)
 
     def _remove_overlay_item(self, item: object) -> None:
@@ -1252,13 +1394,17 @@ class PDFPageWidget(QWidget):
             painter.drawRoundedRect(marker, 4, 4)
             painter.drawText(marker, Qt.AlignCenter, "💬")
 
-        # 10. Selection handles on selected overlay item
-        if self.selected_item is not None and hasattr(self.selected_item, "rect"):
-            wr = self._to_widget_rect(self.selected_item.rect)
-            painter.setPen(QPen(QColor("#2563eb"), 1.5, Qt.DashLine))
-            painter.drawRect(wr)
-            grip = QRectF(wr.right() - 5, wr.bottom() - 5, 10, 10)
-            painter.fillRect(grip, QColor("#2563eb"))
+        # 10. Selection frame (and resize grip for resizable overlay rects)
+        if self.selected_item is not None:
+            bounds = self._annotation_bounds(self.selected_item)
+            if bounds is not None:
+                wr = self._to_widget_rect(bounds)
+                painter.setPen(QPen(QColor("#2563eb"), 1.5, Qt.DashLine))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(wr)
+                if isinstance(self.selected_item, (StampItem, FloatingTextBox, WhiteoutBox, RedactionBox)):
+                    grip = QRectF(wr.right() - 5, wr.bottom() - 5, 10, 10)
+                    painter.fillRect(grip, QColor("#2563eb"))
 
         painter.end()
 

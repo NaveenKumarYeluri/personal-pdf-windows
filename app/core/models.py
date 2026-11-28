@@ -126,6 +126,15 @@ class StickyNote:
     color_hex: str = "#facc15"
     item_id: str = field(default_factory=_new_id)
 
+    @property
+    def pos(self) -> tuple[float, float]:
+        return (self.x, self.y)
+
+    @pos.setter
+    def pos(self, value: tuple[float, float]) -> None:
+        self.x = float(value[0])
+        self.y = float(value[1])
+
 
 @dataclass
 class FloatingTextBox:

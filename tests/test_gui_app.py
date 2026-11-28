@@ -1055,3 +1055,47 @@ def test_partial_editor_formatting_preserves_block_defaults(qtbot):
     assert any("Physically" in s["text"] and s["size"] > 18.0 for s in spans)
     assert any("SQL Server tables" in s["text"] and s["size"] < 15.0 for s in spans)
     saved_doc.close()
+
+
+def test_sticky_note_drag_and_vector_annotation_select_recolor_delete(qtbot, monkeypatch):
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QColorDialog
+    from app.core.models import ShapeItem, StickyNote, TextMarkup
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+
+    tab = win.open_pdf_path(str(SQL_PDF))
+    assert tab is not None
+    pw0 = tab.page_widgets[0]
+    win.set_mode("view")
+
+    nt = StickyNote(page_idx=0, x=140.0, y=220.0, text="Drag me")
+    tab.engine.sticky_notes[0] = [nt]
+    QTest.mousePress(pw0, Qt.LeftButton, Qt.NoModifier, QPoint(int(140 * pw0.zoom), int(220 * pw0.zoom)))
+    QTest.mouseMove(pw0, QPoint(int(210 * pw0.zoom), int(260 * pw0.zoom)))
+    QTest.mouseRelease(pw0, Qt.LeftButton, Qt.NoModifier, QPoint(int(210 * pw0.zoom), int(260 * pw0.zoom)))
+    assert nt.x > 180.0 and nt.y > 240.0
+    win.undo()
+    assert abs(nt.x - 140.0) < 0.5 and abs(nt.y - 220.0) < 0.5
+
+    sh = ShapeItem(page_idx=0, shape_type="rect", rect=(60.0, 300.0, 180.0, 360.0), color_hex="#ef4444")
+    mk = TextMarkup(page_idx=0, markup_type="highlight", rects=[(200.0, 300.0, 260.0, 316.0)])
+    tab.engine.shapes[0] = [sh]
+    tab.engine.markups[0] = [mk]
+    QTest.mouseClick(pw0, Qt.LeftButton, Qt.NoModifier, QPoint(int(120 * pw0.zoom), int(300 * pw0.zoom)))
+    assert pw0.selected_item is sh
+    QTest.keyClick(pw0, Qt.Key_Delete)
+    assert tab.engine.shapes[0] == []
+    win.undo()
+    assert len(tab.engine.shapes[0]) == 1
+
+    mk_menu = pw0.build_context_menu(QPointF(230 * pw0.zoom, 308 * pw0.zoom))
+    monkeypatch.setattr(QColorDialog, "getColor", lambda *a, **kw: QColor("#10b981"))
+    next(a for a in mk_menu.actions() if a.text() == "Change Color...").trigger()
+    assert mk.color_hex == "#10b981"
+    QTest.keyClick(pw0, Qt.Key_Delete)
+    assert tab.engine.markups[0] == []
+    win.undo()
+    assert len(tab.engine.markups[0]) == 1
