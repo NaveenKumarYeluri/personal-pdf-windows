@@ -65,6 +65,7 @@ from app.core.pdf_engine import (
 )
 from app.ui.dialogs import (
     BatesDialog,
+    FindReplaceDialog,
     MergeDialog,
     MetadataDialog,
     OrganizerDialog,
@@ -348,6 +349,7 @@ class MainWindow(QMainWindow):
         }
         self._active_editor: InPlaceTextEditor | None = None
         self._active_editor_page: PDFPageWidget | None = None
+        self._find_replace_dlg: FindReplaceDialog | None = None
         self._right_rail_buttons: list[tuple[QPushButton, str]] = []
         self._right_rail_tab_buttons: dict[int, tuple[QPushButton, str]] = {}
         self._prompt_on_close: bool = False
@@ -440,6 +442,7 @@ class MainWindow(QMainWindow):
         self.ribbon.saveClicked.connect(self.save_current_pdf)
         self.ribbon.saveAsClicked.connect(self.save_as_current_pdf)
         self.ribbon.printClicked.connect(self.print_current_pdf)
+        self.ribbon.findReplaceClicked.connect(self.open_find_replace_dialog)
         self.ribbon.themeToggled.connect(self.toggle_theme)
         self.ribbon.accentChanged.connect(self.set_accent_theme)
         self.ribbon.propsClicked.connect(self.open_metadata_dialog)
@@ -572,6 +575,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+P"), self, activated=self.print_current_pdf)
         QShortcut(QKeySequence("Ctrl+W"), self, activated=lambda: self._request_close_tab(self.tabs.currentIndex()))
         QShortcut(QKeySequence("Ctrl+F"), self, activated=self._focus_search)
+        QShortcut(QKeySequence("Ctrl+H"), self, activated=self.open_find_replace_dialog)
         QShortcut(QKeySequence("F3"), self, activated=lambda: self.step_search(1))
         QShortcut(QKeySequence("Shift+F3"), self, activated=lambda: self.step_search(-1))
         QShortcut(QKeySequence("Ctrl+C"), self, activated=self._shortcut_copy)
@@ -1093,7 +1097,17 @@ class MainWindow(QMainWindow):
             return
         entry = tab.undo_stack.pop()
         tab.redo_stack.append(entry)
-        if entry.kind == "in_place_edit":
+        if entry.kind == "batch_in_place_edits":
+            changes = entry.previous_payload if entry.action == "batch_in_place_edits" else entry.payload
+            for new_op, prev_op in changes:
+                if prev_op is not None:
+                    tab.engine.in_place_edits.setdefault(prev_op.page_idx, {})[prev_op.block_id] = prev_op
+                elif new_op is not None:
+                    tab.engine.in_place_edits.get(new_op.page_idx, {}).pop(new_op.block_id, None)
+            tab.engine.invalidate_cache()
+            self._rebuild_tab_pages(tab)
+            self.sidebar.refresh_thumbnails()
+        elif entry.kind == "in_place_edit":
             op: TextEditOp = entry.payload
             if entry.previous_payload is not None:
                 tab.engine.set_in_place_edit(entry.previous_payload)
@@ -1152,7 +1166,17 @@ class MainWindow(QMainWindow):
             return
         entry = tab.redo_stack.pop()
         tab.undo_stack.append(entry)
-        if entry.kind == "in_place_edit":
+        if entry.kind == "batch_in_place_edits":
+            changes = entry.previous_payload if entry.action == "batch_in_place_edits" else entry.payload
+            for new_op, prev_op in changes:
+                if new_op is not None:
+                    tab.engine.in_place_edits.setdefault(new_op.page_idx, {})[new_op.block_id] = new_op
+                elif prev_op is not None:
+                    tab.engine.in_place_edits.get(prev_op.page_idx, {}).pop(prev_op.block_id, None)
+            tab.engine.invalidate_cache()
+            self._rebuild_tab_pages(tab)
+            self.sidebar.refresh_thumbnails()
+        elif entry.kind == "in_place_edit":
             tab.engine.set_in_place_edit(entry.payload)
             self._rebuild_tab_pages(tab)
             self.sidebar.refresh_thumbnails()
@@ -1531,6 +1555,18 @@ class MainWindow(QMainWindow):
         tab.page_widgets[tab.current_page].update()
         return True
 
+    def _refresh_tab_search_after_doc_change(self, tab: DocumentTab) -> None:
+        if tab is not self.current_tab():
+            return
+        query = self.ribbon.search_input.text().strip()
+        if query:
+            self.run_search(query)
+        else:
+            tab.search_hits = []
+            tab.search_idx = -1
+            tab._apply_search_highlights()
+            self._update_search_label(tab)
+
     def _replace_tab_document(self, tab: DocumentTab, new_bytes: bytes, mark_dirty: bool = True) -> None:
         tab.commit_any_active_editor()
         if tab is self.current_tab():
@@ -1618,6 +1654,126 @@ class MainWindow(QMainWindow):
         self._record_recent_file(path)
         self.status_bar.showMessage(f"Saved as {path}")
         return True
+
+    def open_find_replace_dialog(self) -> FindReplaceDialog | None:
+        tab = self.current_tab()
+        if not tab:
+            QMessageBox.information(self, "Find & Replace", "Please open a PDF document first.")
+            return None
+        dlg = self._find_replace_dlg
+        if dlg is None or not shiboken6.isValid(dlg):
+            dlg = FindReplaceDialog(self.ribbon.search_input.text().strip(), self)
+            dlg.findNextRequested.connect(self._on_fr_find_next)
+            dlg.replaceNextRequested.connect(self._on_fr_replace_next)
+            dlg.replaceAllRequested.connect(self._on_fr_replace_all)
+            self._find_replace_dlg = dlg
+        elif self.ribbon.search_input.text().strip() and not dlg.find_input.text().strip():
+            dlg.find_input.setText(self.ribbon.search_input.text().strip())
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+        dlg.find_input.setFocus()
+        dlg.find_input.selectAll()
+        return dlg
+
+    def _on_fr_find_next(self, query: str, case_sensitive: bool, whole_word: bool) -> None:
+        tab = self.current_tab()
+        if not tab or not query:
+            return
+        if case_sensitive or whole_word:
+            tab.search_hits = tab.engine.search_text(
+                query, case_sensitive=case_sensitive, whole_word=whole_word
+            )
+            tab.search_idx = (tab.search_idx + 1) % len(tab.search_hits) if tab.search_hits else -1
+            tab._apply_search_highlights()
+            self._update_search_label(tab)
+            if tab.search_hits and tab.search_idx >= 0:
+                self._scroll_to_search_hit(tab, tab.search_hits[tab.search_idx])
+        elif self.ribbon.search_input.text() != query:
+            self.ribbon.search_input.setText(query)
+        else:
+            self.step_search(1)
+        if self._find_replace_dlg is not None and shiboken6.isValid(self._find_replace_dlg):
+            total = len(tab.search_hits)
+            cur = (tab.search_idx + 1) if total > 0 and tab.search_idx >= 0 else 0
+            self._find_replace_dlg.lbl_status.setText(
+                f"Match {cur} of {total}" if total else "No matches found"
+            )
+
+    def _on_fr_replace_next(self, query: str, repl: str, case_sensitive: bool, whole_word: bool) -> None:
+        tab = self.current_tab()
+        if not tab or not query:
+            return
+        tab.commit_any_active_editor()
+        changes, count = tab.engine.replace_text_in_blocks(
+            query,
+            repl,
+            case_sensitive=case_sensitive,
+            whole_word=whole_word,
+            replace_all=False,
+            start_page=tab.current_page,
+        )
+        if not changes:
+            if self._find_replace_dlg is not None and shiboken6.isValid(self._find_replace_dlg):
+                self._find_replace_dlg.lbl_status.setText("No editable matches found")
+            return
+        tab.undo_stack.append(
+            _UndoEntry(
+                kind="batch_in_place_edits",
+                page_idx=changes[0][0].page_idx,
+                payload=changes,
+                previous_payload=changes,
+                action="batch_in_place_edits",
+            )
+        )
+        tab.redo_stack.clear()
+        self._rebuild_tab_pages(tab)
+        self._set_tab_dirty(tab, True)
+        self.sidebar.refresh_annotations()
+        self.sidebar.refresh_thumbnails()
+        self._refresh_tab_search_after_doc_change(tab)
+        if self._find_replace_dlg is not None and shiboken6.isValid(self._find_replace_dlg):
+            rem = tab.engine.count_block_matches(query, case_sensitive=case_sensitive, whole_word=whole_word)
+            self._find_replace_dlg.lbl_status.setText(f"Replaced {count} occurrence ({rem} remaining)")
+        self.status_bar.showMessage(f"Replaced {count} occurrence on Page {changes[0][0].page_idx + 1}")
+
+    def _on_fr_replace_all(self, query: str, repl: str, case_sensitive: bool, whole_word: bool) -> None:
+        tab = self.current_tab()
+        if not tab or not query:
+            return
+        tab.commit_any_active_editor()
+        changes, count = tab.engine.replace_text_in_blocks(
+            query,
+            repl,
+            case_sensitive=case_sensitive,
+            whole_word=whole_word,
+            replace_all=True,
+            start_page=0,
+        )
+        if not changes:
+            if self._find_replace_dlg is not None and shiboken6.isValid(self._find_replace_dlg):
+                self._find_replace_dlg.lbl_status.setText("No editable matches found")
+            return
+        tab.undo_stack.append(
+            _UndoEntry(
+                kind="batch_in_place_edits",
+                page_idx=changes[0][0].page_idx,
+                payload=changes,
+                previous_payload=changes,
+                action="batch_in_place_edits",
+            )
+        )
+        tab.redo_stack.clear()
+        self._rebuild_tab_pages(tab)
+        self._set_tab_dirty(tab, True)
+        self.sidebar.refresh_annotations()
+        self.sidebar.refresh_thumbnails()
+        self._refresh_tab_search_after_doc_change(tab)
+        if self._find_replace_dlg is not None and shiboken6.isValid(self._find_replace_dlg):
+            self._find_replace_dlg.lbl_status.setText(
+                f"Replaced {count} occurrence(s) across {len(changes)} text block(s)"
+            )
+        self.status_bar.showMessage(f"Replaced {count} occurrence(s) in {len(changes)} block(s)")
 
     def print_current_pdf(self) -> None:
         tab = self.current_tab()

@@ -46,6 +46,64 @@ def _hex_to_rgb01(hex_color: str) -> tuple[float, float, float]:
     )
 
 
+def compile_text_pattern(query: str, case_sensitive: bool = False, whole_word: bool = False) -> re.Pattern[str]:
+    """Compile a literal search regex with optional case sensitivity and whole-word boundaries."""
+    escaped = re.escape(query)
+    if whole_word:
+        escaped = rf"\b{escaped}\b"
+    flags = 0 if case_sensitive else re.IGNORECASE
+    return re.compile(escaped, flags)
+
+
+def _replace_in_html_text(
+    html_str: str,
+    pattern: re.Pattern[str],
+    replacement: str,
+    replace_all: bool = True,
+) -> tuple[str, int]:
+    """Replace regex matches across HTML text nodes while preserving inline formatting tags."""
+    tokens = re.split(r"(<[^>]+>)", html_str or "")
+    raw_segs = [tok for idx, tok in enumerate(tokens) if idx % 2 == 0]
+    plain_segs = [html_lib.unescape(seg) for seg in raw_segs]
+    offsets: list[tuple[int, int]] = []
+    pos = 0
+    for ps in plain_segs:
+        offsets.append((pos, pos + len(ps)))
+        pos += len(ps)
+    joined = "".join(plain_segs)
+    matches = list(pattern.finditer(joined))
+    if not matches:
+        return html_str, 0
+    if not replace_all:
+        matches = matches[:1]
+
+    modified = [False] * len(plain_segs)
+    for m in reversed(matches):
+        ms, me = m.start(), m.end()
+        first_hit = True
+        for i, (os_, oe_) in enumerate(offsets):
+            if oe_ <= ms or os_ >= me:
+                continue
+            rel_s = max(0, ms - os_)
+            rel_e = min(oe_ - os_, me - os_)
+            seg_txt = plain_segs[i]
+            if first_hit:
+                plain_segs[i] = seg_txt[:rel_s] + replacement + seg_txt[rel_e:]
+                first_hit = False
+            else:
+                plain_segs[i] = seg_txt[:rel_s] + seg_txt[rel_e:]
+            modified[i] = True
+
+    out_tokens: list[str] = []
+    for idx, tok in enumerate(tokens):
+        if idx % 2 == 1:
+            out_tokens.append(tok)
+        else:
+            seg_i = idx // 2
+            out_tokens.append(html_lib.escape(plain_segs[seg_i]) if modified[seg_i] else tok)
+    return "".join(out_tokens), len(matches)
+
+
 def qt_html_to_clean_html(
     raw_html: str,
     default_font: str = "Calibri",
@@ -457,16 +515,27 @@ class PDFDocumentEngine:
         raw_toc = doc.get_toc(simple=True) or []
         return [(lvl, title, max(0, pno - 1)) for lvl, title, pno in raw_toc]
 
-    def search_text(self, query: str) -> list[SearchHit]:
+    def search_text(
+        self,
+        query: str,
+        case_sensitive: bool = False,
+        whole_word: bool = False,
+    ) -> list[SearchHit]:
         """Find all matching occurrences across all pages using MuPDF search_for."""
         q = (query or "").strip()
         if not q or not self.base_pdf_bytes or self.needs_password:
             return []
         doc = self._get_preview_doc()
+        pat = compile_text_pattern(q, case_sensitive=case_sensitive, whole_word=whole_word) if (case_sensitive or whole_word) else None
         hits: list[SearchHit] = []
         for pno, page in enumerate(doc):
             rects = page.search_for(q)
             for r in rects:
+                if pat is not None:
+                    clip = pymupdf.Rect(r.x0 - 2.0, r.y0 - 1.0, r.x1 + 2.0, r.y1 + 1.0)
+                    txt = heal_pdf_text(page.get_textbox(clip) or "")
+                    if not pat.search(txt):
+                        continue
                 hits.append(SearchHit(page_idx=pno, rect=(r.x0, r.y0, r.x1, r.y1), snippet=q))
         return hits
 
@@ -771,6 +840,107 @@ class PDFDocumentEngine:
         removed = page_map.pop(block_id)
         self.invalidate_cache()
         return removed
+
+    def count_block_matches(
+        self, query: str, case_sensitive: bool = False, whole_word: bool = False
+    ) -> int:
+        """Count editable occurrences of query across all PDF text blocks."""
+        q = query or ""
+        if not q.strip() or not self.base_pdf_bytes or self.needs_password:
+            return 0
+        pat = compile_text_pattern(q, case_sensitive=case_sensitive, whole_word=whole_word)
+        total = 0
+        for pno in range(self.page_count):
+            for blk in self.extract_text_blocks(pno):
+                txt = blk.full_edit_text if blk.full_edit_text is not None else blk.plain_text
+                total += len(pat.findall(txt or ""))
+        return total
+
+    def replace_text_in_blocks(
+        self,
+        query: str,
+        replacement: str,
+        case_sensitive: bool = False,
+        whole_word: bool = False,
+        replace_all: bool = True,
+        start_page: int = 0,
+    ) -> tuple[list[tuple[TextEditOp, TextEditOp | None]], int]:
+        """
+        Replace vector text occurrences inside structural TextBlocks while preserving
+        formatting and reflow. Returns ([(new_op, prev_op), ...], replacement_count).
+        """
+        q = query or ""
+        if not q or not self.base_pdf_bytes or self.needs_password:
+            return [], 0
+        total_pages = self.page_count
+        if total_pages <= 0:
+            return [], 0
+
+        pat = compile_text_pattern(q, case_sensitive=case_sensitive, whole_word=whole_word)
+        start = max(0, min(start_page, total_pages - 1))
+        page_order = list(range(start, total_pages)) + list(range(0, start))
+
+        planned: list[tuple[TextEditOp, TextEditOp | None]] = []
+        seen_keys: set[tuple[int, str]] = set()
+        total_count = 0
+
+        for pno in page_order:
+            for blk in self.extract_text_blocks(pno):
+                target_page_idx = blk.base_page_idx if blk.base_page_idx >= 0 else pno
+                target_block_id = blk.base_block_id or blk.block_id
+                if (target_page_idx, target_block_id) in seen_keys:
+                    continue
+                src_html = blk.full_edit_html if blk.full_edit_html is not None else blk.html
+                src_text = blk.full_edit_text if blk.full_edit_text is not None else blk.plain_text
+                new_html, n_hits = _replace_in_html_text(
+                    src_html, pat, replacement, replace_all=replace_all
+                )
+                if n_hits <= 0:
+                    continue
+                seen_keys.add((target_page_idx, target_block_id))
+                # Recompute clean plain text from modified HTML text nodes
+                plain_tokens = [
+                    html_lib.unescape(tok)
+                    for idx, tok in enumerate(re.split(r"(<[^>]+>)", new_html))
+                    if idx % 2 == 0
+                ]
+                new_plain = re.sub(r"\s+", " ", "".join(plain_tokens)).strip()
+                target_base_rect = blk.base_rect or blk.rect
+                prev_op = self.in_place_edits.get(target_page_idx, {}).get(target_block_id)
+                is_new = bool(
+                    blk.is_new_block
+                    or (prev_op is not None and prev_op.is_new_block)
+                    or target_block_id.startswith("new_")
+                )
+                op = TextEditOp(
+                    edit_id=uuid.uuid4().hex[:10],
+                    page_idx=target_page_idx,
+                    orig_rect=target_base_rect,
+                    target_rect=target_base_rect,
+                    original_text=src_text,
+                    original_html=src_html,
+                    new_text=new_plain,
+                    new_html=new_html,
+                    font_family=blk.font_family,
+                    font_size=blk.font_size,
+                    color_hex=blk.color_hex,
+                    line_height_ratio=blk.line_height_ratio,
+                    reflow_enabled=True,
+                    is_new_block=is_new,
+                    block_id=target_block_id,
+                )
+                planned.append((op, prev_op))
+                total_count += n_hits
+                if not replace_all:
+                    break
+            if not replace_all and planned:
+                break
+
+        if planned:
+            for op, _prev in planned:
+                self.in_place_edits.setdefault(op.page_idx, {})[op.block_id] = op
+            self.invalidate_cache()
+        return planned, total_count
 
     def build_bytes_with_text_edits(self, src_bytes: bytes) -> bytes:
         """

@@ -1099,3 +1099,21 @@ def test_sticky_note_drag_and_vector_annotation_select_recolor_delete(qtbot, mon
     assert tab.engine.markups[0] == []
     win.undo()
     assert len(tab.engine.markups[0]) == 1
+
+
+def test_find_replace_dialog_replaces_vector_text_and_undoes(qtbot):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+    tab = win.load_sample_pdf()
+    fr = win.open_find_replace_dialog()
+    assert fr is not None
+    fr.find_input.setText("Edit & Watermark")
+    fr.replace_input.setText("Inline Vector")
+    fr.btn_replace_all.click()
+    assert "Inline Vector" in pymupdf.open(stream=tab.engine.build_final_pdf_bytes(), filetype="pdf")[0].get_text("text")
+    assert "Replaced" in fr.lbl_status.text()
+
+    win.undo()
+    assert "Edit & Watermark" in pymupdf.open(stream=tab.engine.build_final_pdf_bytes(), filetype="pdf")[0].get_text("text")
+    fr.close()

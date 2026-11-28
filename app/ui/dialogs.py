@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 import sys
 import pymupdf
-from PySide6.QtCore import QPoint, QSize, Qt
+from PySide6.QtCore import QPoint, QSize, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -1026,3 +1026,69 @@ class PdfPrintDialog(QDialog):
         if result == QDialog.Rejected:
             self.close_doc()
         super().done(result)
+
+
+class FindReplaceDialog(QDialog):
+    """Interactive vector Find & Replace dialog operating cleanly on PDF TextBlocks."""
+
+    findNextRequested = Signal(str, bool, bool)
+    replaceNextRequested = Signal(str, str, bool, bool)
+    replaceAllRequested = Signal(str, str, bool, bool)
+
+    def __init__(self, initial_query: str = "", parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("Find & Replace (Vector Text)")
+        self.resize(440, 190)
+
+        form = QFormLayout(self)
+        self.find_input = QLineEdit(initial_query)
+        self.find_input.setPlaceholderText("Find text...")
+        self.replace_input = QLineEdit()
+        self.replace_input.setPlaceholderText("Replace with...")
+        form.addRow("Find:", self.find_input)
+        form.addRow("Replace:", self.replace_input)
+
+        opts = QHBoxLayout()
+        self.chk_case = QCheckBox("Case sensitive")
+        self.chk_word = QCheckBox("Whole words")
+        opts.addWidget(self.chk_case)
+        opts.addWidget(self.chk_word)
+        opts.addStretch()
+        form.addRow("", opts)
+
+        self.lbl_status = QLabel("")
+        self.lbl_status.setStyleSheet("color: #64748b; font-size: 11.5px;")
+        form.addRow(self.lbl_status)
+
+        btn_row = QHBoxLayout()
+        self.btn_find = QPushButton("Find Next")
+        self.btn_replace = QPushButton("Replace")
+        self.btn_replace_all = QPushButton("Replace All")
+        self.btn_replace_all.setObjectName("PrimaryBtn")
+        self.btn_close = QPushButton("Close")
+        for b in (self.btn_find, self.btn_replace, self.btn_replace_all, self.btn_close):
+            btn_row.addWidget(b)
+        form.addRow(btn_row)
+
+        self.btn_find.clicked.connect(
+            lambda: self.findNextRequested.emit(
+                self.find_input.text(), self.chk_case.isChecked(), self.chk_word.isChecked()
+            )
+        )
+        self.btn_replace.clicked.connect(
+            lambda: self.replaceNextRequested.emit(
+                self.find_input.text(),
+                self.replace_input.text(),
+                self.chk_case.isChecked(),
+                self.chk_word.isChecked(),
+            )
+        )
+        self.btn_replace_all.clicked.connect(
+            lambda: self.replaceAllRequested.emit(
+                self.find_input.text(),
+                self.replace_input.text(),
+                self.chk_case.isChecked(),
+                self.chk_word.isChecked(),
+            )
+        )
+        self.btn_close.clicked.connect(self.close)

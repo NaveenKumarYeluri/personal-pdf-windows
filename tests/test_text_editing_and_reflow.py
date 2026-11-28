@@ -272,7 +272,7 @@ def test_add_text_and_reediting_new_block_preserves_and_overflows():
     doc2.close()
 
 
-def test_clear_block_to_empty_leaves_no_phantom_block():
+def test_clear_block_to_empty_and_vector_find_replace():
     raw = SQL_PDF.read_bytes()
     eng = PDFDocumentEngine(raw, "SQL.pdf")
     blocks_p1 = eng.extract_text_blocks(0)
@@ -299,3 +299,23 @@ def test_clear_block_to_empty_leaves_no_phantom_block():
     assert not any(b.base_block_id == target.block_id for b in after_blocks)
     y_next_after = next(b for b in after_blocks if "Physically, SQL Server tables" in b.plain_text).rect[1]
     assert abs(y_next_after - y_next_before) < 1.0
+
+    # Vector Find & Replace preserves inline bold while replacing across spans
+    eng2 = PDFDocumentEngine(raw, "SQL.pdf")
+    changes, n_hits = eng2.replace_text_in_blocks(
+        "8 KB pages", "16 KB extents", case_sensitive=True, whole_word=True, replace_all=True
+    )
+    assert n_hits >= 1 and len(changes) >= 1
+    out = eng2.build_final_pdf_bytes()
+    doc = pymupdf.open(stream=out, filetype="pdf")
+    assert "16 KB extents" in doc[0].get_text("text")
+    assert "8 KB pages" not in doc[0].get_text("text")
+    spans = [
+        sp
+        for b in doc[0].get_text("dict")["blocks"]
+        if b["type"] == 0
+        for ln in b["lines"]
+        for sp in ln["spans"]
+    ]
+    assert any("16 KB extents" in sp["text"] and (sp["flags"] & 16 or "bold" in sp["font"].lower()) for sp in spans)
+    doc.close()
