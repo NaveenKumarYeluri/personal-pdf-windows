@@ -71,46 +71,90 @@ def resolve_pdf_font_name(raw_font_name: str) -> tuple[str, bool, bool]:
     return "Calibri", is_bold, is_italic
 
 
+@lru_cache(maxsize=64)
+def _read_font_bytes(filename: str) -> bytes | None:
+    full_path = os.path.join(WINDOWS_FONTS_DIR, filename)
+    if not os.path.exists(full_path):
+        return None
+    try:
+        with open(full_path, "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def _font_variants_for_family(family: str) -> tuple[str, str, str, str]:
+    # Windows calibri.ttf substitutes 'ti' -> U+019F (Ɵ) in MuPDF HarfBuzz PDF export;
+    # map Calibri PDF export to Segoe UI so exported PDFs stay 100% searchable & clean.
+    if family == "Calibri" and os.path.exists(os.path.join(WINDOWS_FONTS_DIR, "segoeui.ttf")):
+        return ("segoeui.ttf", "segoeuib.ttf", "segoeuii.ttf", "segoeuiz.ttf")
+    return FONT_CATALOG[family]
+
+
+@lru_cache(maxsize=32)
+def _build_css_and_archive(families_key: tuple[str, ...]) -> tuple[str, pymupdf.Archive | None]:
+    rules: list[str] = [
+        "body, p, div, span { margin: 0; padding: 0; }",
+        "p { margin-bottom: 3pt; }",
+    ]
+    if not os.path.isdir(WINDOWS_FONTS_DIR):
+        return "\n".join(rules), None
+
+    arch = pymupdf.Archive()
+    added_files: set[str] = set()
+
+    def _add_font_file(filename: str) -> bool:
+        if filename in added_files:
+            return True
+        data = _read_font_bytes(filename)
+        if data is None:
+            return False
+        arch.add(data, filename)
+        added_files.add(filename)
+        return True
+
+    for family in families_key:
+        if family not in FONT_CATALOG:
+            continue
+        reg, bold, ital, bold_ital = _font_variants_for_family(family)
+        variants = [
+            (reg, "normal", "normal"),
+            (bold, "bold", "normal"),
+            (ital, "normal", "italic"),
+            (bold_ital, "bold", "italic"),
+        ]
+        for filename, weight, style in variants:
+            if _add_font_file(filename):
+                rules.append(
+                    f'@font-face {{ font-family: "{family}"; src: url("{filename}"); '
+                    f"font-weight: {weight}; font-style: {style}; }}"
+                )
+
+    for generic, target in [
+        ("sans-serif", "segoeui.ttf"),
+        ("serif", "times.ttf"),
+        ("monospace", "consola.ttf"),
+    ]:
+        if _add_font_file(target):
+            rules.append(f'@font-face {{ font-family: {generic}; src: url("{target}"); }}')
+
+    return "\n".join(rules), (arch if added_files else None)
+
+
+def get_font_resources_for_html(html_str: str) -> tuple[str, pymupdf.Archive | None]:
+    """Return minimal (css, Archive) containing only the catalog fonts referenced by html_str."""
+    lower_html = (html_str or "").lower()
+    matched = tuple(sorted(fam for fam in FONT_CATALOG if fam.lower() in lower_html))
+    return _build_css_and_archive(matched)
+
+
 @lru_cache(maxsize=1)
 def get_windows_font_archive() -> pymupdf.Archive | None:
-    """Create a cached MuPDF Archive pointing at Windows Fonts if present."""
-    if os.path.isdir(WINDOWS_FONTS_DIR):
-        return pymupdf.Archive(WINDOWS_FONTS_DIR)
-    return None
+    """Create a cached in-memory MuPDF Archive containing only the curated catalog fonts."""
+    return _build_css_and_archive(tuple(sorted(FONT_CATALOG.keys())))[1]
 
 
 @lru_cache(maxsize=1)
 def build_mupdf_font_css() -> str:
     """Build @font-face rules for MuPDF Story/insert_htmlbox matching Windows fonts."""
-    rules: list[str] = [
-        "body, p, div, span { margin: 0; padding: 0; }",
-        "p { margin-bottom: 3pt; }",
-    ]
-    if os.path.isdir(WINDOWS_FONTS_DIR):
-        for family, (reg, bold, ital, bold_ital) in FONT_CATALOG.items():
-            # Windows calibri.ttf substitutes 'ti' -> U+019F (Ɵ) in MuPDF HarfBuzz PDF export;
-            # map Calibri PDF export to Segoe UI so exported PDFs stay 100% searchable & clean.
-            if family == "Calibri" and os.path.exists(os.path.join(WINDOWS_FONTS_DIR, "segoeui.ttf")):
-                reg, bold, ital, bold_ital = ("segoeui.ttf", "segoeuib.ttf", "segoeuii.ttf", "segoeuiz.ttf")
-            variants = [
-                (reg, "normal", "normal"),
-                (bold, "bold", "normal"),
-                (ital, "normal", "italic"),
-                (bold_ital, "bold", "italic"),
-            ]
-            for filename, weight, style in variants:
-                full_path = os.path.join(WINDOWS_FONTS_DIR, filename)
-                if os.path.exists(full_path):
-                    rules.append(
-                        f'@font-face {{ font-family: "{family}"; src: url("{filename}"); '
-                        f"font-weight: {weight}; font-style: {style}; }}"
-                    )
-        # Provide generic fallbacks mapped to Segoe UI / Times New Roman / Consolas
-        for generic, target in [
-            ("sans-serif", "segoeui.ttf"),
-            ("serif", "times.ttf"),
-            ("monospace", "consola.ttf"),
-        ]:
-            if os.path.exists(os.path.join(WINDOWS_FONTS_DIR, target)):
-                rules.append(f'@font-face {{ font-family: {generic}; src: url("{target}"); }}')
-    return "\n".join(rules)
+    return _build_css_and_archive(tuple(sorted(FONT_CATALOG.keys())))[0]

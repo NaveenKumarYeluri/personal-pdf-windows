@@ -380,3 +380,38 @@ def test_heading_edit_preserves_bold_and_does_not_shift_page():
     after_p1 = eng.extract_text_blocks(0)
     assert abs(next(b for b in after_p1 if "Physically, SQL Server tables" in b.plain_text).rect[1] - below_y0) < 0.5
     assert abs(next(b for b in after_p1 if "When you store data" in b.plain_text).rect[1] - bottom_y0) < 0.5
+
+
+def test_edit_text_build_is_fast_with_curated_font_archive():
+    import time
+    from app.core.fonts import get_font_resources_for_html
+
+    css, _arch = get_font_resources_for_html('<div style="font-family:\'Calibri\',sans-serif;"><p>Test</p></div>')
+    assert '"Calibri"' in css
+    assert '"Impact"' not in css
+
+    raw = SQL_PDF.read_bytes()
+    eng = PDFDocumentEngine(raw, "SQL.pdf")
+    b1 = next(b for b in eng.extract_text_blocks(0) if "Physically, SQL Server tables" in b.plain_text)
+
+    # Warm once then verify repeated edit builds stay well below 1.5s (previously 4-6s+)
+    eng.set_in_place_edit(
+        TextEditOp(
+            edit_id="perf1",
+            page_idx=0,
+            orig_rect=b1.rect,
+            target_rect=b1.rect,
+            original_text=b1.plain_text,
+            original_html=b1.html,
+            new_text="Fast edited paragraph text.",
+            new_html='<div style="font-family:\'Calibri\',sans-serif;font-size:12pt;"><p>Fast edited paragraph text.</p></div>',
+            font_family=b1.font_family,
+            font_size=b1.font_size,
+            color_hex=b1.color_hex,
+            block_id=b1.block_id,
+        )
+    )
+    t0 = time.perf_counter()
+    eng.build_bytes_with_text_edits(raw)
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 1.5, f"build_bytes_with_text_edits took {elapsed:.2f}s"

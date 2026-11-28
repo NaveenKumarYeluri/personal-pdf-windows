@@ -9,10 +9,13 @@ import re
 import uuid
 from dataclasses import dataclass
 
+from functools import lru_cache
+
 import pymupdf
 
 from app.core.fonts import (
     build_mupdf_font_css,
+    get_font_resources_for_html,
     get_windows_font_archive,
     resolve_pdf_font_name,
 )
@@ -142,20 +145,22 @@ def qt_html_to_clean_html(
     )
 
 
+@lru_cache(maxsize=512)
+def _measure_html_height_cached(clean_html: str, width_tenths: int) -> float:
+    css, arch = get_font_resources_for_html(clean_html)
+    story = pymupdf.Story(html=clean_html, user_css=css, archive=arch)
+    rect = pymupdf.Rect(0, 0, max(30.0, width_tenths / 10.0), 100000.0)
+    _more, filled = story.place(rect)
+    if filled[3] <= filled[1]:
+        return 14.0
+    return float(filled[3] - filled[1]) + 2.0
+
+
 def measure_html_height(clean_html: str, width_pt: float) -> float:
     """Measure the exact height in PDF points required to render clean_html at width_pt."""
     if not clean_html or not clean_html.strip():
         return 14.0
-    css = build_mupdf_font_css()
-    arch = get_windows_font_archive()
-    story = pymupdf.Story(html=clean_html, user_css=css, archive=arch)
-    body = story.body
-    # Place inside a tall virtual box and see where content ends
-    rect = pymupdf.Rect(0, 0, max(30.0, width_pt), 100000.0)
-    more, filled = story.place(rect)
-    if filled[3] <= filled[1]:
-        return 14.0
-    return float(filled[3] - filled[1]) + 2.0
+    return _measure_html_height_cached(clean_html, int(round(max(30.0, width_pt) * 10.0)))
 
 
 def split_html_to_fit(
@@ -991,8 +996,6 @@ class PDFDocumentEngine:
         multi-page overflow cascades.
         """
         doc = pymupdf.open(stream=src_bytes, filetype="pdf")
-        css = build_mupdf_font_css()
-        arch = get_windows_font_archive()
         self._preview_flow_blocks.clear()
         self._modified_pages.clear()
 
@@ -1498,7 +1501,8 @@ class PDFDocumentEngine:
                     w = max(40.0, item.x1 - item.x0)
                     h = max(16.0, (item.y1 - item.y0) + 8.0)
                     target = pymupdf.Rect(item.x0, item.y0, item.x0 + w, min(page_h - 8.0, item.y0 + h))
-                    page.insert_htmlbox(target, item.html, css=css, archive=arch)
+                    item_css, item_arch = get_font_resources_for_html(item.html)
+                    page.insert_htmlbox(target, item.html, css=item_css, archive=item_arch)
                     if item.base_block_id:
                         preview_list.append(
                             TextBlock(
@@ -1555,8 +1559,6 @@ class PDFDocumentEngine:
         doc = pymupdf.open(stream=working_bytes, filetype="pdf")
         if self.form_values:
             self._apply_form_values_to_doc(doc)
-        css = build_mupdf_font_css()
-        arch = get_windows_font_archive()
 
         for page_idx in range(len(doc)):
             page = doc[page_idx]
@@ -1638,7 +1640,8 @@ class PDFDocumentEngine:
                     default_size_pt=tb.font_size,
                     default_color=tb.color_hex,
                 )
-                page.insert_htmlbox(r, html_str, css=css, archive=arch)
+                tb_css, tb_arch = get_font_resources_for_html(html_str)
+                page.insert_htmlbox(r, html_str, css=tb_css, archive=tb_arch)
 
             # 7. Stamps, signatures, and inserted images
             for stp in self.stamps.get(page_idx, []):
@@ -1714,8 +1717,8 @@ def build_pdf_from_word_flow_html(raw_html: str, page_size: tuple[float, float] 
     import io
 
     clean = qt_html_to_clean_html(raw_html)
-    css = build_mupdf_font_css() + "\nbody { margin: 0; }\np { margin-bottom: 6pt; }"
-    arch = get_windows_font_archive()
+    base_css, arch = get_font_resources_for_html(clean)
+    css = base_css + "\nbody { margin: 0; }\np { margin-bottom: 6pt; }"
     story = pymupdf.Story(html=clean, user_css=css, archive=arch)
 
     w, h = page_size
