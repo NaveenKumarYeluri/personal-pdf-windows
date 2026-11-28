@@ -1538,3 +1538,35 @@ def test_draw_stamp_auto_selects_moves_resizes_and_scales_font(qtbot):
     win.undo()
     assert stp.rect == moved_rect
     assert stp.font_size == orig_fs
+
+
+def test_add_text_defaults_to_black_and_draw_color_button_shows_swatch(qtbot, monkeypatch):
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QColorDialog
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+    tab = win.load_sample_pdf()
+    pw0 = tab.page_widgets[0]
+
+    # Add Text must default to black ink (#000000), not pen red (#ef4444)
+    win.set_mode("edit")
+    win._set_active_tool("add_text")
+    QTest.mouseClick(pw0, Qt.LeftButton, Qt.NoModifier, QPoint(int(80 * pw0.zoom), int(480 * pw0.zoom)))
+    assert pw0.active_editor is not None
+    assert pw0.active_editor.current_format_state()["color"].lower() == "#000000"
+    pw0.cancel_active_editor()
+
+    # Draw Color button displays active tool's color swatch
+    win.set_mode("annotate")
+    c_btn = win.ribbon._color_btn
+    assert c_btn is not None
+    assert c_btn.icon().pixmap(12, 12).toImage().pixelColor(6, 6).name().lower() == "#ef4444"
+
+    win._set_active_tool("highlighter")
+    assert c_btn.icon().pixmap(12, 12).toImage().pixelColor(6, 6).name().lower() == "#eab308"
+
+    monkeypatch.setattr(QColorDialog, "getColor", lambda *a, **kw: QColor("#10b981"))
+    win._on_tool_action("pick_color", {})
+    assert c_btn.icon().pixmap(12, 12).toImage().pixelColor(6, 6).name().lower() == "#10b981"

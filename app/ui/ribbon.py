@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QObject, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QActionGroup, QIntValidator
+from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QIntValidator, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -70,6 +70,8 @@ class RibbonHeader(QWidget):
         self._mode_tool_buttons: dict[str, QPushButton] = {}
         self._width_combo: QComboBox | None = None
         self._active_width_pt: float = 3.0
+        self._color_btn: QPushButton | None = None
+        self._active_color_hex: str = "#ef4444"
         self._typing_search = False
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
@@ -376,8 +378,28 @@ class RibbonHeader(QWidget):
                 except RuntimeError:
                     self._width_combo = None
 
+    def set_color_indicator(self, color_hex: str) -> None:
+        self._active_color_hex = color_hex or "#ef4444"
+        btn = self._color_btn
+        if btn is None:
+            return
+        try:
+            pm = QPixmap(12, 12)
+            pm.fill(Qt.transparent)
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.Antialiasing, True)
+            p.setPen(QColor("#64748b"))
+            p.setBrush(QColor(self._active_color_hex))
+            p.drawRoundedRect(1, 1, 10, 10, 2.5, 2.5)
+            p.end()
+            btn.setIcon(QIcon(pm))
+            btn.setIconSize(QSize(12, 12))
+        except RuntimeError:
+            self._color_btn = None
+
     def _clear_dynamic_tools(self) -> None:
         self._width_combo = None
+        self._color_btn = None
         self._mode_tool_group = None
         self._mode_tool_buttons.clear()
         while self.dynamic_layout.count():
@@ -466,7 +488,8 @@ class RibbonHeader(QWidget):
             ]:
                 b = self._add_tool_btn(label, tname, checkable=True, checked=chk)
                 grp.addButton(b)
-            self._add_tool_btn("Color", "pick_color")
+            self._color_btn = self._add_tool_btn("Color", "pick_color")
+            self.set_color_indicator(self._active_color_hex)
             stamp_combo = QComboBox()
             stamp_combo.addItems(["Stamp...", "APPROVED", "REJECTED", "CONFIDENTIAL", "DRAFT", "FINAL", "PAID", "Custom..."])
             def _on_stamp_picked(val: str, cb: QComboBox = stamp_combo) -> None:

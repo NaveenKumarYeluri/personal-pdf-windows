@@ -342,6 +342,7 @@ class MainWindow(QMainWindow):
         self._hl_color = "#eab308"
         self._hl_width = 14.0
         self._hl_opacity = 0.35
+        self._text_color = "#000000"
         self.tool_state = {
             "tool": "select",
             "color": self._ink_color,
@@ -1469,11 +1470,18 @@ class MainWindow(QMainWindow):
             self.tool_state["color"] = self._hl_color
             self.tool_state["width"] = self._hl_width
             self.tool_state["opacity"] = self._hl_opacity
+        elif tool == "add_text":
+            self.tool_state["color"] = self._text_color
+            self.tool_state["width"] = self._ink_width
+            self.tool_state["opacity"] = 1.0
         else:
             self.tool_state["color"] = self._ink_color
             self.tool_state["width"] = self._ink_width
             self.tool_state["opacity"] = 1.0
         self.ribbon.set_width_indicator(self.tool_state["width"])
+        self.ribbon.set_color_indicator(
+            self._hl_color if tool == "highlighter" else self._ink_color
+        )
         self.ribbon.set_active_tool_indicator(tool)
         if tab:
             for pw in tab.page_widgets:
@@ -1521,6 +1529,7 @@ class MainWindow(QMainWindow):
                 else:
                     self._ink_color = col.name()
                 self.tool_state["color"] = col.name()
+                self.ribbon.set_color_indicator(col.name())
                 for pw in tab.page_widgets:
                     pw.set_tool_state(**self.tool_state)
 
