@@ -37,6 +37,8 @@ def build_stylesheet(dark: bool = False, accent: str = "#ea2e3f", accent_hover: 
         text_primary = "#f1f5f9"
         text_secondary = "#94a3b8"
         tab_active = "#32343d"
+        danger_bg = "#3b181c"
+        danger_hover = "#521f25"
     else:
         bg_app = "#f4f5f7"
         bg_bar = "#ffffff"
@@ -48,6 +50,8 @@ def build_stylesheet(dark: bool = False, accent: str = "#ea2e3f", accent_hover: 
         text_primary = "#0f172a"
         text_secondary = "#475569"
         tab_active = "#f1f5f9"
+        danger_bg = "#fef2f2"
+        danger_hover = "#fee2e2"
 
     return f"""
     QMainWindow, QDialog {{
@@ -124,9 +128,9 @@ def build_stylesheet(dark: bool = False, accent: str = "#ea2e3f", accent_hover: 
     QPushButton#RailBtn, QToolButton#RailBtn {{
         background-color: transparent;
         color: {text_primary};
-        border: none;
+        border: 1px solid transparent;
         border-radius: 8px;
-        padding: 5px 2px;
+        padding: 3px 2px;
         font-size: 10.5px;
         font-weight: 500;
     }}
@@ -136,15 +140,32 @@ def build_stylesheet(dark: bool = False, accent: str = "#ea2e3f", accent_hover: 
     QPushButton#RailBtn:checked, QToolButton#RailBtn:checked {{
         background-color: {accent};
         color: #ffffff;
+        border: 1px solid {accent_hover};
+        font-weight: 600;
+    }}
+    QPushButton#RailBtn:checked:hover, QToolButton#RailBtn:checked:hover {{
+        background-color: {accent_hover};
+        color: #ffffff;
     }}
     QPushButton#PillBtn {{
         background-color: {bg_input};
+        color: {text_primary};
         border: 1px solid {border};
         border-radius: 6px;
-        padding: 4px 10px;
+        padding: 4px 11px;
+        font-weight: 600;
     }}
     QPushButton#PillBtn:hover {{
         background-color: {bg_hover};
+    }}
+    QPushButton#PillBtn:checked {{
+        background-color: {accent};
+        color: #ffffff;
+        border: 1px solid {accent_hover};
+    }}
+    QPushButton#PillBtn:checked:hover {{
+        background-color: {accent_hover};
+        color: #ffffff;
     }}
     QPushButton#PrimaryBtn {{
         background-color: {accent};
@@ -160,8 +181,32 @@ def build_stylesheet(dark: bool = False, accent: str = "#ea2e3f", accent_hover: 
     QPushButton#DangerBtn {{
         background-color: #dc2626;
         color: #ffffff;
+        border: 1px solid #b91c1c;
         border-radius: 6px;
-        padding: 4px 10px;
+        padding: 4px 11px;
+        font-weight: 600;
+    }}
+    QPushButton#DangerBtn:hover {{
+        background-color: #b91c1c;
+    }}
+    QPushButton#DangerBtn[checkable="true"] {{
+        background-color: {danger_bg};
+        color: #dc2626;
+        border: 1px solid #dc2626;
+        font-weight: 600;
+    }}
+    QPushButton#DangerBtn[checkable="true"]:hover {{
+        background-color: {danger_hover};
+    }}
+    QPushButton#DangerBtn:checked {{
+        background-color: #dc2626;
+        color: #ffffff;
+        border: 1px solid #991b1b;
+        font-weight: 600;
+    }}
+    QPushButton#DangerBtn:checked:hover {{
+        background-color: #b91c1c;
+        color: #ffffff;
     }}
     QFrame#TopDivider {{
         background-color: {border};

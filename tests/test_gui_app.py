@@ -1217,3 +1217,83 @@ def test_split_every_n_signature_reuse_print_label_jpeg_and_ui_sync(qtbot, tmp_p
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **kw: (str(jpg_out), "JPEG Image (*.jpg *.jpeg)"))
     win._on_tool_action("export_png", {})
     assert jpg_out.exists() and jpg_out.read_bytes().startswith(b"\xff\xd8")
+
+
+def test_left_rail_and_context_ribbon_active_highlighting(qtbot):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+    qtbot.wait(10)
+
+    def _bg_hex(widget) -> str:
+        return widget.grab().toImage().pixelColor(4, 4).name().lower()
+
+    def _has_white_icon_pixel(btn, icon_sz: int = 18) -> bool:
+        pm = btn.icon().pixmap(icon_sz, icon_sz)
+        img = pm.toImage()
+        return any(
+            img.pixelColor(x, y).alpha() > 200 and img.pixelColor(x, y).red() > 240 and img.pixelColor(x, y).blue() > 240
+            for x in range(img.width())
+            for y in range(img.height())
+        )
+
+    accent_hex = win.accent_color.lower()
+
+    # Initial View mode: View button active with accent fill and white icon
+    btn_view = win.left_rail.buttons["view"][0]
+    btn_edit = win.left_rail.buttons["edit"][0]
+    assert btn_view.isChecked() and not btn_edit.isChecked()
+    assert _bg_hex(btn_view) == accent_hex
+    assert _bg_hex(btn_edit) != accent_hex
+    assert _has_white_icon_pixel(btn_view)
+    assert not _has_white_icon_pixel(btn_edit)
+
+    # Switch to Edit mode: Left rail Edit highlighted + Edit Text pill highlighted vs Add Text pill
+    win.set_mode("edit")
+    qtbot.wait(10)
+    assert btn_edit.isChecked() and not btn_view.isChecked()
+    assert _bg_hex(btn_edit) == accent_hex
+    assert _has_white_icon_pixel(btn_edit)
+    assert not _has_white_icon_pixel(btn_view)
+
+    b_edit_text = win.ribbon._mode_tool_buttons["edit_text"]
+    b_add_text = win.ribbon._mode_tool_buttons["add_text"]
+    assert b_edit_text.isChecked() and not b_add_text.isChecked()
+    assert _bg_hex(b_edit_text) == accent_hex
+    assert _bg_hex(b_add_text) != accent_hex
+
+    b_add_text.click()
+    qtbot.wait(10)
+    assert b_add_text.isChecked() and not b_edit_text.isChecked()
+    assert _bg_hex(b_add_text) == accent_hex
+    assert _bg_hex(b_edit_text) != accent_hex
+
+    # Annotate mode: Pen active by default, switching to Highlighter updates pill color
+    win.set_mode("annotate")
+    qtbot.wait(10)
+    b_pen = win.ribbon._mode_tool_buttons["pen"]
+    b_hl = win.ribbon._mode_tool_buttons["highlighter"]
+    assert _bg_hex(b_pen) == accent_hex
+    assert _bg_hex(b_hl) != accent_hex
+    b_hl.click()
+    qtbot.wait(10)
+    assert _bg_hex(b_hl) == accent_hex
+    assert _bg_hex(b_pen) != accent_hex
+
+    # Protect mode: Redact Area distinguishes unchecked vs active state
+    win.set_mode("protect")
+    qtbot.wait(10)
+    b_redact = win.ribbon._mode_tool_buttons["redact"]
+    assert not b_redact.isChecked()
+    assert _bg_hex(b_redact) != "#dc2626"
+    b_redact.click()
+    qtbot.wait(10)
+    assert b_redact.isChecked()
+    assert _bg_hex(b_redact) == "#dc2626"
+
+    # Dark theme + Pan toggle preserve active white icons and accent highlights
+    win.toggle_theme()
+    win.left_rail.btn_pan.click()
+    qtbot.wait(10)
+    assert _bg_hex(win.left_rail.btn_pan) == accent_hex
+    assert _has_white_icon_pixel(win.left_rail.btn_pan, 16)

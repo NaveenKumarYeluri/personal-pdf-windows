@@ -548,6 +548,7 @@ class LeftToolsRail(QFrame):
             btn.setIconSize(QSize(18, 18))
             btn.setFixedSize(50, 48)
             btn.clicked.connect(lambda _chk, k=key: self.modeSelected.emit(k))
+            btn.toggled.connect(self._sync_button_icons)
             self.group.addButton(btn)
             self.buttons[key] = (btn, icon_name)
             layout.addWidget(btn)
@@ -565,6 +566,7 @@ class LeftToolsRail(QFrame):
         self.btn_pan.clicked.connect(
             lambda chk: self.toolAction.emit("tool:pan" if chk else "tool:select", {})
         )
+        self.btn_pan.toggled.connect(self._sync_button_icons)
         layout.addWidget(self.btn_pan)
 
         self.btn_copy = QToolButton()
@@ -580,16 +582,23 @@ class LeftToolsRail(QFrame):
 
         layout.addStretch()
         self.buttons["view"][0].setChecked(True)
+        self._sync_button_icons()
+
+    def _sync_button_icons(self, *_args) -> None:
+        for btn, icon_name in self.buttons.values():
+            col = "#ffffff" if btn.isChecked() else self._icon_color
+            btn.setIcon(make_icon(icon_name, col, 18))
+        pan_col = "#ffffff" if self.btn_pan.isChecked() else self._icon_color
+        self.btn_pan.setIcon(make_icon("pan", pan_col, 16))
+        self.btn_copy.setIcon(make_icon("copy", self._icon_color, 16))
 
     def set_active_mode(self, mode: str) -> None:
         if mode in self.buttons:
             self.buttons[mode][0].setChecked(True)
         if mode != "view":
             self.btn_pan.setChecked(False)
+        self._sync_button_icons()
 
     def refresh_icon_theme(self, dark: bool) -> None:
         self._icon_color = "#e2e8f0" if dark else "#334155"
-        for btn, icon_name in self.buttons.values():
-            btn.setIcon(make_icon(icon_name, self._icon_color, 18))
-        self.btn_pan.setIcon(make_icon("pan", self._icon_color, 16))
-        self.btn_copy.setIcon(make_icon("copy", self._icon_color, 16))
+        self._sync_button_icons()
