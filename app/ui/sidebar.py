@@ -26,6 +26,10 @@ class SidebarPanel(QFrame):
     pageSelected = Signal(int)
     bookmarkAdded = Signal(str, int)
     bookmarkRemoved = Signal(str, int)
+    bookmarkRenamed = Signal(str, str, int)
+    pageActionRequested = Signal(str, int)
+    annotationJumpRequested = Signal(int, object)
+    annotationDeleteRequested = Signal(int, str, object)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -53,6 +57,8 @@ class SidebarPanel(QFrame):
         self.thumb_list.setIconSize(QSize(136, 180))
         self.thumb_list.setSpacing(4)
         self.thumb_list.itemClicked.connect(self._on_thumb_clicked)
+        self.thumb_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.thumb_list.customContextMenuRequested.connect(self._on_thumb_context_menu)
         self.thumb_list.verticalScrollBar().valueChanged.connect(self._render_visible_thumbnails)
         self.tabs.addTab(self.thumb_list, "Pages")
 
@@ -81,6 +87,8 @@ class SidebarPanel(QFrame):
         av.addWidget(self.btn_refresh_annots)
         self.annot_list = QListWidget()
         self.annot_list.itemClicked.connect(self._on_annot_clicked)
+        self.annot_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.annot_list.customContextMenuRequested.connect(self._on_annot_context_menu)
         av.addWidget(self.annot_list)
         self.tabs.addTab(annot_wrap, "Notes")
 
@@ -210,55 +218,108 @@ class SidebarPanel(QFrame):
             empty.setFlags(Qt.NoItemFlags)
             self.outline_list.addItem(empty)
 
+    @staticmethod
+    def _rect_for_payload(kind: str, item: object) -> tuple[float, float, float, float] | None:
+        if kind == "in_place_edit":
+            return getattr(item, "target_rect", None) or getattr(item, "orig_rect", None)
+        if kind == "note":
+            return (item.x - 16.0, item.y - 16.0, item.x + 16.0, item.y + 16.0)
+        if kind == "ink" and getattr(item, "points", None):
+            xs = [p[0] for p in item.points]
+            ys = [p[1] for p in item.points]
+            return (min(xs), min(ys), max(xs), max(ys))
+        if kind == "markup" and getattr(item, "rects", None):
+            return (
+                min(r[0] for r in item.rects),
+                min(r[1] for r in item.rects),
+                max(r[2] for r in item.rects),
+                max(r[3] for r in item.rects),
+            )
+        return getattr(item, "rect", None)
+
+    def _add_annot_item(self, label: str, pno: int, kind: str = "", payload: object = None, rect=None) -> None:
+        item = QListWidgetItem(label)
+        item.setData(Qt.UserRole, pno)
+        item.setData(Qt.UserRole + 1, {"kind": kind, "payload": payload, "rect": rect})
+        self.annot_list.addItem(item)
+
     def refresh_annotations(self) -> None:
         self.annot_list.clear()
         if self._engine is None:
             return
         for pno, ops in sorted(self._engine.in_place_edits.items()):
             for op in ops.values():
-                item = QListWidgetItem(f"✏️ Text Edit p.{pno + 1}: {op.new_text[:32]}")
-                item.setData(Qt.UserRole, pno)
-                self.annot_list.addItem(item)
+                self._add_annot_item(
+                    f"✏️ Text Edit p.{pno + 1}: {op.new_text[:32]}",
+                    pno,
+                    "in_place_edit",
+                    op,
+                    self._rect_for_payload("in_place_edit", op),
+                )
         for pno, notes in sorted(self._engine.sticky_notes.items()):
             for nt in notes:
-                item = QListWidgetItem(f"💬 Note p.{pno + 1}: {nt.text[:32]}")
-                item.setData(Qt.UserRole, pno)
-                self.annot_list.addItem(item)
+                self._add_annot_item(
+                    f"💬 Note p.{pno + 1}: {nt.text[:32]}",
+                    pno,
+                    "note",
+                    nt,
+                    self._rect_for_payload("note", nt),
+                )
         for pno, stps in sorted(self._engine.stamps.items()):
             for stp in stps:
                 lbl = stp.text if stp.kind == "stamp" else "Signature/Image"
-                item = QListWidgetItem(f"📌 {lbl} (p.{pno + 1})")
-                item.setData(Qt.UserRole, pno)
-                self.annot_list.addItem(item)
+                self._add_annot_item(f"📌 {lbl} (p.{pno + 1})", pno, "stamp", stp, stp.rect)
+        for pno, tbs in sorted(self._engine.text_boxes.items()):
+            for tb in tbs:
+                self._add_annot_item(
+                    f"📝 Text Box p.{pno + 1}: {tb.plain_text[:28]}",
+                    pno,
+                    "textbox",
+                    tb,
+                    tb.rect,
+                )
         for pno, strokes in sorted(self._engine.ink_strokes.items()):
             if strokes:
-                item = QListWidgetItem(f"🖍️ {len(strokes)} ink/highlight stroke(s) (p.{pno + 1})")
-                item.setData(Qt.UserRole, pno)
-                self.annot_list.addItem(item)
+                rect = self._rect_for_payload("ink", strokes[0])
+                self._add_annot_item(
+                    f"🖍️ {len(strokes)} ink/highlight stroke(s) (p.{pno + 1})",
+                    pno,
+                    "ink_group",
+                    strokes,
+                    rect,
+                )
         for pno, shapes in sorted(self._engine.shapes.items()):
-            if shapes:
-                item = QListWidgetItem(f"📐 {len(shapes)} shape(s) (p.{pno + 1})")
-                item.setData(Qt.UserRole, pno)
-                self.annot_list.addItem(item)
+            for sh in shapes:
+                self._add_annot_item(
+                    f"📐 {sh.shape_type.title()} (p.{pno + 1})",
+                    pno,
+                    "shape",
+                    sh,
+                    self._rect_for_payload("shape", sh),
+                )
         for pno, markups in sorted(self._engine.markups.items()):
-            if markups:
-                item = QListWidgetItem(f"🔖 {len(markups)} text markup(s) (p.{pno + 1})")
-                item.setData(Qt.UserRole, pno)
-                self.annot_list.addItem(item)
+            for mk in markups:
+                self._add_annot_item(
+                    f"🔖 {mk.markup_type.title()} markup (p.{pno + 1})",
+                    pno,
+                    "markup",
+                    mk,
+                    self._rect_for_payload("markup", mk),
+                )
         for pno, wbs in sorted(self._engine.whiteouts.items()):
-            if wbs:
-                item = QListWidgetItem(f"⬜ {len(wbs)} whiteout box(es) (p.{pno + 1})")
-                item.setData(Qt.UserRole, pno)
-                self.annot_list.addItem(item)
+            for wb in wbs:
+                self._add_annot_item(f"⬜ Whiteout box (p.{pno + 1})", pno, "whiteout", wb, wb.rect)
         for pno, rbs in sorted(self._engine.redactions.items()):
-            if rbs:
-                item = QListWidgetItem(f"⬛ {len(rbs)} redaction area(s) (p.{pno + 1})")
-                item.setData(Qt.UserRole, pno)
-                self.annot_list.addItem(item)
-        for (pno, _w_idx), val in sorted(self._engine.form_values.items()):
-            item = QListWidgetItem(f"📝 Form Field p.{pno + 1}: {str(val)[:32]}")
-            item.setData(Qt.UserRole, pno)
-            self.annot_list.addItem(item)
+            for rb in rbs:
+                self._add_annot_item(f"⬛ Redaction area (p.{pno + 1})", pno, "redact", rb, rb.rect)
+        for (pno, w_idx), val in sorted(self._engine.form_values.items()):
+            self._add_annot_item(
+                f"📝 Form Field p.{pno + 1}: {str(val)[:32]}",
+                pno,
+                "form_value",
+                w_idx,
+                None,
+            )
         if self.annot_list.count() == 0:
             empty = QListWidgetItem("No edits or annotations yet")
             empty.setFlags(Qt.NoItemFlags)
@@ -269,6 +330,34 @@ class SidebarPanel(QFrame):
         if isinstance(pno, int):
             self.pageSelected.emit(pno)
 
+    def _on_thumb_context_menu(self, pos: QPoint) -> None:
+        if self._engine is None or self._engine.needs_password:
+            return
+        item = self.thumb_list.itemAt(pos)
+        if item is None:
+            return
+        pno = item.data(Qt.UserRole)
+        if not isinstance(pno, int):
+            return
+        menu = QMenu(self)
+        act_rcw = menu.addAction("Rotate 90° CW")
+        act_rccw = menu.addAction("Rotate 90° CCW")
+        menu.addSeparator()
+        act_blank = menu.addAction("Insert Blank Page After")
+        act_dup = menu.addAction("Duplicate Page")
+        act_del = menu.addAction("Delete Page")
+        act_del.setEnabled(self._engine.page_count > 1)
+        chosen = menu.exec(self.thumb_list.mapToGlobal(pos))
+        mapping = {
+            act_rcw: "rotate_cw",
+            act_rccw: "rotate_ccw",
+            act_blank: "insert_blank_after",
+            act_dup: "duplicate",
+            act_del: "delete",
+        }
+        if chosen in mapping:
+            self.pageActionRequested.emit(mapping[chosen], pno)
+
     def _on_outline_clicked(self, item: QListWidgetItem) -> None:
         pno = item.data(Qt.UserRole)
         if isinstance(pno, int):
@@ -276,8 +365,40 @@ class SidebarPanel(QFrame):
 
     def _on_annot_clicked(self, item: QListWidgetItem) -> None:
         pno = item.data(Qt.UserRole)
+        meta = item.data(Qt.UserRole + 1) or {}
         if isinstance(pno, int):
-            self.pageSelected.emit(pno)
+            rect = meta.get("rect") if isinstance(meta, dict) else None
+            if rect is not None:
+                self.annotationJumpRequested.emit(pno, rect)
+            else:
+                self.pageSelected.emit(pno)
+
+    def _on_annot_context_menu(self, pos: QPoint) -> None:
+        if self._engine is None:
+            return
+        item = self.annot_list.itemAt(pos)
+        if item is None:
+            return
+        pno = item.data(Qt.UserRole)
+        meta = item.data(Qt.UserRole + 1)
+        if not isinstance(pno, int) or not isinstance(meta, dict) or not meta.get("kind"):
+            return
+        kind = meta["kind"]
+        payload = meta.get("payload")
+        rect = meta.get("rect")
+        menu = QMenu(self)
+        act_jump = menu.addAction("Go to Item")
+        act_del = menu.addAction("Delete")
+        if kind in ("stamp", "textbox", "whiteout", "redact") and getattr(payload, "locked", False):
+            act_del.setEnabled(False)
+        chosen = menu.exec(self.annot_list.mapToGlobal(pos))
+        if chosen is act_jump:
+            if rect is not None:
+                self.annotationJumpRequested.emit(pno, rect)
+            else:
+                self.pageSelected.emit(pno)
+        elif chosen is act_del:
+            self.annotationDeleteRequested.emit(pno, kind, payload)
 
     def _on_add_bookmark(self) -> None:
         if self._engine is None:
@@ -300,8 +421,17 @@ class SidebarPanel(QFrame):
         if not isinstance(bm_idx, int) or not (0 <= bm_idx < len(self._engine.custom_bookmarks)):
             return
         menu = QMenu(self)
+        act_ren = menu.addAction("Rename Bookmark...")
         act_del = menu.addAction("Delete Bookmark")
-        if menu.exec(self.outline_list.mapToGlobal(pos)) is act_del:
+        chosen = menu.exec(self.outline_list.mapToGlobal(pos))
+        if chosen is act_ren:
+            old_title, pno = self._engine.custom_bookmarks[bm_idx]
+            new_title, ok = QInputDialog.getText(self, "Rename Bookmark", "Bookmark title:", text=old_title)
+            if ok and new_title.strip() and new_title.strip() != old_title:
+                self._engine.custom_bookmarks[bm_idx] = (new_title.strip(), pno)
+                self.refresh_outline()
+                self.bookmarkRenamed.emit(old_title, new_title.strip(), pno)
+        elif chosen is act_del:
             title, pno = self._engine.custom_bookmarks.pop(bm_idx)
             self.refresh_outline()
             self.bookmarkRemoved.emit(title, pno)

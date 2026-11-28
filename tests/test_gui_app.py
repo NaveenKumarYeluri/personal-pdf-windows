@@ -1117,3 +1117,40 @@ def test_find_replace_dialog_replaces_vector_text_and_undoes(qtbot):
     win.undo()
     assert "Edit & Watermark" in pymupdf.open(stream=tab.engine.build_final_pdf_bytes(), filetype="pdf")[0].get_text("text")
     fr.close()
+
+
+def test_document_snapshot_undo_redo_and_sidebar_actions(qtbot):
+    from app.core.models import StickyNote
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+
+    tab = win.open_pdf_path(str(SQL_PDF))
+    assert tab is not None
+    orig_pages = tab.engine.page_count
+
+    win._on_sidebar_page_action("insert_blank_after", 0)
+    assert tab.engine.page_count == orig_pages + 1
+    win.undo()
+    assert tab.engine.page_count == orig_pages
+    win.redo()
+    assert tab.engine.page_count == orig_pages + 1
+    win.undo()
+    assert tab.engine.page_count == orig_pages
+
+    nt_sb = StickyNote(page_idx=1, x=120.0, y=180.0, text="Sidebar note check")
+    tab.engine.sticky_notes[1] = [nt_sb]
+    win.sidebar.refresh_annotations()
+    win._on_sidebar_annot_jump(1, (104.0, 164.0, 136.0, 196.0))
+    assert tab.current_page == 1
+    win._on_sidebar_annot_delete(1, "note", nt_sb)
+    assert tab.engine.sticky_notes[1] == []
+    win.undo()
+    assert len(tab.engine.sticky_notes[1]) == 1
+
+    tab.engine.custom_bookmarks.append(("Old Name", 0))
+    win.sidebar.refresh_outline()
+    tab.engine.custom_bookmarks[0] = ("New Name", 0)
+    win.sidebar.bookmarkRenamed.emit("Old Name", "New Name", 0)
+    assert tab.dirty is True

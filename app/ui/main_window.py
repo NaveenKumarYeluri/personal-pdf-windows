@@ -466,6 +466,10 @@ class MainWindow(QMainWindow):
         self.sidebar.pageSelected.connect(self.go_to_page)
         self.sidebar.bookmarkAdded.connect(self._on_bookmark_added)
         self.sidebar.bookmarkRemoved.connect(self._on_bookmark_removed)
+        self.sidebar.bookmarkRenamed.connect(self._on_bookmark_renamed)
+        self.sidebar.pageActionRequested.connect(self._on_sidebar_page_action)
+        self.sidebar.annotationJumpRequested.connect(self._on_sidebar_annot_jump)
+        self.sidebar.annotationDeleteRequested.connect(self._on_sidebar_annot_delete)
         self.sidebar.tabs.currentChanged.connect(lambda _idx: self._sync_right_rail_buttons())
 
     def _build_right_nav_rail(self) -> QFrame:
@@ -759,6 +763,125 @@ class MainWindow(QMainWindow):
             tab.base_modified = True
             self._set_tab_dirty(tab, True)
         self.status_bar.showMessage(f"Bookmark removed: {title} (Page {page_idx + 1})")
+
+    def _on_bookmark_renamed(self, old_title: str, new_title: str, page_idx: int) -> None:
+        tab = self.current_tab()
+        if tab is not None:
+            tab.base_modified = True
+            self._set_tab_dirty(tab, True)
+        self.status_bar.showMessage(f"Bookmark renamed: {old_title} -> {new_title} (Page {page_idx + 1})")
+
+    def _on_sidebar_page_action(self, action: str, page_idx: int) -> None:
+        tab = self.current_tab()
+        if tab is None or tab.engine.page_count <= 0:
+            return
+        total = tab.engine.page_count
+        if not (0 <= page_idx < total):
+            return
+        cur_bytes = tab.engine.build_final_pdf_bytes()
+        ops = [PageOp(original_index=i) for i in range(total)]
+        target_page = page_idx
+        if action == "rotate_cw":
+            ops[page_idx] = PageOp(original_index=page_idx, rotation_delta=90)
+        elif action == "rotate_ccw":
+            ops[page_idx] = PageOp(original_index=page_idx, rotation_delta=-90)
+        elif action == "insert_blank_after":
+            ops.insert(page_idx + 1, PageOp(original_index=None))
+            target_page = page_idx + 1
+        elif action == "duplicate":
+            ops.insert(page_idx + 1, PageOp(original_index=page_idx))
+            target_page = page_idx + 1
+        elif action == "delete":
+            if total <= 1:
+                QMessageBox.warning(self, "Delete Page", "At least one page must remain in the document.")
+                return
+            ops.pop(page_idx)
+            target_page = min(page_idx, len(ops) - 1)
+        else:
+            return
+        new_bytes = organize_pages(cur_bytes, ops)
+        self._replace_tab_document(tab, new_bytes, mark_dirty=True, record_undo=True)
+        self.go_to_page(target_page)
+        self.status_bar.showMessage(f"Updated Page {page_idx + 1} ({action.replace('_', ' ')})")
+
+    def _on_sidebar_annot_jump(self, page_idx: int, rect_obj: object) -> None:
+        tab = self.current_tab()
+        if tab is None or not (0 <= page_idx < tab.engine.page_count):
+            return
+        if isinstance(rect_obj, (tuple, list)) and len(rect_obj) == 4:
+            tab.scroll_to_rect(page_idx, tuple(float(v) for v in rect_obj))
+            self.ribbon.update_page_info(page_idx, tab.engine.page_count)
+            self.sidebar.set_current_page(page_idx)
+        else:
+            self.go_to_page(page_idx)
+
+    def _on_sidebar_annot_delete(self, page_idx: int, kind: str, payload: object) -> None:
+        tab = self.current_tab()
+        if tab is None or not (0 <= page_idx < tab.engine.page_count):
+            return
+        if kind == "in_place_edit" and hasattr(payload, "block_id"):
+            removed = tab.engine.remove_in_place_edit(page_idx, payload.block_id)
+            if removed is not None:
+                tab.undo_stack.append(
+                    _UndoEntry(
+                        kind="batch_in_place_edits",
+                        page_idx=page_idx,
+                        payload=[],
+                        previous_payload=[(None, removed)],
+                        action="batch_in_place_edits",
+                    )
+                )
+                tab.redo_stack.clear()
+                self._rebuild_tab_pages(tab)
+                self.sidebar.refresh_thumbnails()
+        elif kind == "ink_group" and isinstance(payload, list):
+            removed_strokes = list(payload)
+            strokes = tab.engine.ink_strokes.get(page_idx, [])
+            for st in removed_strokes:
+                if st in strokes:
+                    strokes.remove(st)
+            if removed_strokes:
+                tab.undo_stack.append(
+                    _UndoEntry(kind="ink_group", page_idx=page_idx, payload=removed_strokes, action="remove")
+                )
+                tab.redo_stack.clear()
+                tab.page_widgets[page_idx].update()
+        elif kind == "form_value" and isinstance(payload, int):
+            old_val = tab.engine.form_values.get((page_idx, payload))
+            tab.engine.remove_form_value(page_idx, payload)
+            had_prev = any(
+                e.action == "form_value" and e.page_idx == page_idx and e.payload == payload
+                for e in tab.undo_stack
+            )
+            tab.undo_stack.append(
+                _UndoEntry(
+                    kind="form_value",
+                    page_idx=page_idx,
+                    payload=payload,
+                    previous_payload=(had_prev, old_val),
+                    action="form_value",
+                    new_value=None,
+                )
+            )
+            tab.redo_stack.clear()
+            tab.page_widgets[page_idx].refresh_render()
+            self.sidebar.refresh_thumbnails()
+        else:
+            store = self._store_for_kind(tab.engine, kind)
+            lst = store.get(page_idx, [])
+            if payload in lst:
+                lst.remove(payload)
+                pw = tab.page_widgets[page_idx]
+                if pw.selected_item is payload:
+                    pw.selected_item = None
+                pw.update()
+                tab.undo_stack.append(_UndoEntry(kind=kind, page_idx=page_idx, payload=payload, action="remove"))
+                tab.redo_stack.clear()
+            else:
+                return
+        self._set_tab_dirty(tab, tab.base_modified or bool(tab.undo_stack))
+        self.sidebar.refresh_annotations()
+        self.status_bar.showMessage(f"Removed item from Page {page_idx + 1}")
 
     def _callbacks_for(self, tab: DocumentTab) -> dict:
         return {
@@ -1097,7 +1220,15 @@ class MainWindow(QMainWindow):
             return
         entry = tab.undo_stack.pop()
         tab.redo_stack.append(entry)
-        if entry.kind == "batch_in_place_edits":
+        if entry.kind == "doc_snapshot":
+            snap, was_base_mod, target_page = entry.previous_payload
+            tab.engine.restore_snapshot(snap)
+            tab.base_modified = bool(was_base_mod)
+            tab.current_page = min(target_page, max(0, tab.engine.page_count - 1))
+            self._rebuild_tab_pages(tab)
+            self.sidebar.set_engine(tab.engine, tab.current_page)
+            self._refresh_tab_search_after_doc_change(tab)
+        elif entry.kind == "batch_in_place_edits":
             changes = entry.previous_payload if entry.action == "batch_in_place_edits" else entry.payload
             for new_op, prev_op in changes:
                 if prev_op is not None:
@@ -1115,10 +1246,17 @@ class MainWindow(QMainWindow):
                 tab.engine.remove_in_place_edit(entry.page_idx, op.block_id)
             self._rebuild_tab_pages(tab)
             self.sidebar.refresh_thumbnails()
+        elif entry.kind == "ink_group":
+            lst = tab.engine.ink_strokes.setdefault(entry.page_idx, [])
+            for st in entry.payload:
+                if st not in lst:
+                    lst.append(st)
+            if 0 <= entry.page_idx < len(tab.page_widgets):
+                tab.page_widgets[entry.page_idx].update()
         elif entry.action == "form_value":
             w_idx = int(entry.payload)
             had_prev, prev_val = entry.previous_payload
-            if had_prev:
+            if had_prev and prev_val is not None:
                 tab.engine.set_form_value(entry.page_idx, w_idx, prev_val)
             else:
                 tab.engine.remove_form_value(entry.page_idx, w_idx)
@@ -1166,7 +1304,15 @@ class MainWindow(QMainWindow):
             return
         entry = tab.redo_stack.pop()
         tab.undo_stack.append(entry)
-        if entry.kind == "batch_in_place_edits":
+        if entry.kind == "doc_snapshot":
+            snap, mark_dirty_flag, target_page = entry.payload
+            tab.engine.restore_snapshot(snap)
+            tab.base_modified = bool(mark_dirty_flag)
+            tab.current_page = min(target_page, max(0, tab.engine.page_count - 1))
+            self._rebuild_tab_pages(tab)
+            self.sidebar.set_engine(tab.engine, tab.current_page)
+            self._refresh_tab_search_after_doc_change(tab)
+        elif entry.kind == "batch_in_place_edits":
             changes = entry.previous_payload if entry.action == "batch_in_place_edits" else entry.payload
             for new_op, prev_op in changes:
                 if new_op is not None:
@@ -1180,9 +1326,19 @@ class MainWindow(QMainWindow):
             tab.engine.set_in_place_edit(entry.payload)
             self._rebuild_tab_pages(tab)
             self.sidebar.refresh_thumbnails()
+        elif entry.kind == "ink_group":
+            lst = tab.engine.ink_strokes.setdefault(entry.page_idx, [])
+            for st in entry.payload:
+                if st in lst:
+                    lst.remove(st)
+            if 0 <= entry.page_idx < len(tab.page_widgets):
+                tab.page_widgets[entry.page_idx].update()
         elif entry.action == "form_value":
             w_idx = int(entry.payload)
-            tab.engine.set_form_value(entry.page_idx, w_idx, entry.new_value)
+            if entry.new_value is None:
+                tab.engine.remove_form_value(entry.page_idx, w_idx)
+            else:
+                tab.engine.set_form_value(entry.page_idx, w_idx, entry.new_value)
             if 0 <= entry.page_idx < len(tab.page_widgets):
                 tab.page_widgets[entry.page_idx].refresh_render()
             self.sidebar.refresh_thumbnails()
@@ -1567,18 +1723,47 @@ class MainWindow(QMainWindow):
             tab._apply_search_highlights()
             self._update_search_label(tab)
 
-    def _replace_tab_document(self, tab: DocumentTab, new_bytes: bytes, mark_dirty: bool = True) -> None:
+    def _replace_tab_document(
+        self,
+        tab: DocumentTab,
+        new_bytes: bytes,
+        mark_dirty: bool = True,
+        record_undo: bool = True,
+    ) -> None:
         tab.commit_any_active_editor()
         if tab is self.current_tab():
             self._hide_floating_bar()
         old_path = tab.engine.file_path
         old_name = tab.engine.name
+        prev_page = tab.current_page
+        prev_base_mod = tab.base_modified
+        before_snap = tab.engine.export_snapshot() if record_undo else None
+
         tab.engine = PDFDocumentEngine(new_bytes, name=old_name, file_path=old_path)
         tab.current_page = min(tab.current_page, max(0, tab.engine.page_count - 1))
-        tab.undo_stack.clear()
-        tab.redo_stack.clear()
+        if record_undo and before_snap is not None:
+            after_snap = tab.engine.export_snapshot()
+            tab.undo_stack.append(
+                _UndoEntry(
+                    kind="doc_snapshot",
+                    page_idx=prev_page,
+                    payload=(after_snap, mark_dirty, tab.current_page),
+                    previous_payload=(before_snap, prev_base_mod, prev_page),
+                    action="doc_snapshot",
+                )
+            )
+            tab.redo_stack.clear()
+            doc_snaps = [i for i, e in enumerate(tab.undo_stack) if e.kind == "doc_snapshot"]
+            while len(doc_snaps) > 10:
+                drop_idx = doc_snaps.pop(0)
+                tab.undo_stack.pop(drop_idx)
+                doc_snaps = [i for i, e in enumerate(tab.undo_stack) if e.kind == "doc_snapshot"]
+        else:
+            tab.undo_stack.clear()
+            tab.redo_stack.clear()
+
         tab.base_modified = mark_dirty
-        self._set_tab_dirty(tab, mark_dirty)
+        self._set_tab_dirty(tab, mark_dirty or bool(tab.undo_stack))
         for i in range(self.tabs.count()):
             if self.tabs.tabData(i) is tab:
                 self.tabs.setTabToolTip(i, old_path or old_name)
@@ -1586,14 +1771,7 @@ class MainWindow(QMainWindow):
         self._rebuild_tab_pages(tab)
         if tab is self.current_tab():
             self.sidebar.set_engine(tab.engine, tab.current_page)
-            query = self.ribbon.search_input.text().strip()
-            if query:
-                self.run_search(query)
-            else:
-                tab.search_hits = []
-                tab.search_idx = -1
-                tab._apply_search_highlights()
-                self._update_search_label(tab)
+            self._refresh_tab_search_after_doc_change(tab)
 
     def open_metadata_dialog(self) -> None:
         tab = self.current_tab()
@@ -1627,7 +1805,7 @@ class MainWindow(QMainWindow):
         except OSError as err:
             QMessageBox.critical(self, "Save PDF", f"Could not save file:\n{err}")
             return False
-        self._replace_tab_document(tab, out_bytes, mark_dirty=False)
+        self._replace_tab_document(tab, out_bytes, mark_dirty=False, record_undo=False)
         self.status_bar.showMessage(f"Saved {tab.engine.file_path}")
         return True
 
@@ -1650,7 +1828,7 @@ class MainWindow(QMainWindow):
             return False
         tab.engine.file_path = path
         tab.engine.name = os.path.basename(path)
-        self._replace_tab_document(tab, out_bytes, mark_dirty=False)
+        self._replace_tab_document(tab, out_bytes, mark_dirty=False, record_undo=False)
         self._record_recent_file(path)
         self.status_bar.showMessage(f"Saved as {path}")
         return True

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import html as html_lib
 import math
 import re
@@ -398,6 +399,40 @@ class PDFDocumentEngine:
         self._preview_flow_blocks.clear()
         self._modified_pages.clear()
         self._edit_revision += 1
+
+    def export_snapshot(self) -> dict:
+        """Capture base PDF bytes and all pending edits/annotations for undo/redo."""
+        return {
+            "base_pdf_bytes": self.base_pdf_bytes,
+            "in_place_edits": copy.deepcopy(self.in_place_edits),
+            "ink_strokes": copy.deepcopy(self.ink_strokes),
+            "shapes": copy.deepcopy(self.shapes),
+            "markups": copy.deepcopy(self.markups),
+            "sticky_notes": copy.deepcopy(self.sticky_notes),
+            "text_boxes": copy.deepcopy(self.text_boxes),
+            "stamps": copy.deepcopy(self.stamps),
+            "whiteouts": copy.deepcopy(self.whiteouts),
+            "redactions": copy.deepcopy(self.redactions),
+            "custom_bookmarks": list(self.custom_bookmarks),
+            "form_values": dict(self.form_values),
+        }
+
+    def restore_snapshot(self, snap: dict) -> None:
+        """Restore engine state from a previously exported snapshot."""
+        self.base_pdf_bytes = snap["base_pdf_bytes"]
+        self.in_place_edits = copy.deepcopy(snap["in_place_edits"])
+        self.ink_strokes = copy.deepcopy(snap["ink_strokes"])
+        self.shapes = copy.deepcopy(snap["shapes"])
+        self.markups = copy.deepcopy(snap["markups"])
+        self.sticky_notes = copy.deepcopy(snap["sticky_notes"])
+        self.text_boxes = copy.deepcopy(snap["text_boxes"])
+        self.stamps = copy.deepcopy(snap["stamps"])
+        self.whiteouts = copy.deepcopy(snap["whiteouts"])
+        self.redactions = copy.deepcopy(snap["redactions"])
+        self.custom_bookmarks = list(snap["custom_bookmarks"])
+        self.form_values = dict(snap["form_values"])
+        self.needs_password = False
+        self.invalidate_cache()
 
     def get_page_render_revision(self, page_idx: int) -> int:
         """Return 0 for untouched base pages, or current edit revision for modified/overflowed pages."""
