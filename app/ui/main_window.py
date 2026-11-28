@@ -331,9 +331,12 @@ class MainWindow(QMainWindow):
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
-        self.dark_theme = False
-        self.accent_color = "#ea2e3f"
-        self.accent_hover = "#d22333"
+        settings = QSettings("Personal", "Personal PDF Suite")
+        self.dark_theme = self._as_bool(settings.value("darkTheme", False), False)
+        saved_accent = str(settings.value("accentColor", "#ea2e3f") or "#ea2e3f")
+        saved_hover = str(settings.value("accentHover", "#d22333") or "#d22333")
+        self.accent_color = saved_accent if saved_accent.startswith("#") else "#ea2e3f"
+        self.accent_hover = saved_hover if saved_hover.startswith("#") else "#d22333"
 
         self._ink_color = "#ef4444"
         self._ink_width = 3.0
@@ -631,9 +634,20 @@ class MainWindow(QMainWindow):
                 QApplication.clipboard().setText(heal_pdf_text(joined))
                 self.status_bar.showMessage(f"Copied {len(joined)} characters to clipboard")
 
+    @staticmethod
+    def _as_bool(val: object, default: bool = False) -> bool:
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, str):
+            return val.strip().lower() in ("1", "true", "yes", "on")
+        if isinstance(val, int):
+            return val != 0
+        return default
+
     def _apply_theme(self) -> None:
         self.setStyleSheet(build_stylesheet(self.dark_theme, self.accent_color, self.accent_hover))
         self.ribbon.refresh_icon_theme(self.dark_theme)
+        self.ribbon.sync_theme_menu(self.dark_theme, self.accent_color)
         self.left_rail.refresh_icon_theme(self.dark_theme)
         col = "#e2e8f0" if self.dark_theme else "#334155"
         for btn, icon_name in self._right_rail_buttons:
@@ -647,12 +661,19 @@ class MainWindow(QMainWindow):
 
     def toggle_theme(self) -> None:
         self.dark_theme = not self.dark_theme
+        settings = QSettings("Personal", "Personal PDF Suite")
+        settings.setValue("darkTheme", self.dark_theme)
+        settings.sync()
         self._apply_theme()
         self.status_bar.showMessage("Dark theme active" if self.dark_theme else "Light theme active")
 
     def set_accent_theme(self, color: str, hover: str) -> None:
         self.accent_color = color
         self.accent_hover = hover
+        settings = QSettings("Personal", "Personal PDF Suite")
+        settings.setValue("accentColor", color)
+        settings.setValue("accentHover", hover)
+        settings.sync()
         self._apply_theme()
         for i in range(self.doc_stack.count()):
             w = self.doc_stack.widget(i)

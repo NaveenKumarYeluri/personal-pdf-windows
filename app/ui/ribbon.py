@@ -208,11 +208,24 @@ class RibbonHeader(QWidget):
         menu.addAction("Find & Replace... (Ctrl+H)", self.findReplaceClicked.emit)
         menu.addSeparator()
         menu.addAction("Document Properties...", self.propsClicked.emit)
-        menu.addAction("Toggle Dark / Light Theme", self.themeToggled.emit)
+        self.act_theme = menu.addAction("Toggle Dark / Light Theme", self.themeToggled.emit)
+        self.act_theme.setCheckable(True)
         accent_sub = menu.addMenu("Accent Color")
+        accent_grp = QActionGroup(accent_sub)
+        accent_grp.setExclusive(True)
+        self._accent_actions: dict[str, QAction] = {}
         for name, col, hov in ACCENT_PRESETS:
-            accent_sub.addAction(name, lambda c=col, h=hov: self.accentChanged.emit(c, h))
+            act = accent_sub.addAction(name, lambda c=col, h=hov: self.accentChanged.emit(c, h))
+            act.setCheckable(True)
+            accent_grp.addAction(act)
+            self._accent_actions[col.lower()] = act
         self.btn_menu.setMenu(menu)
+
+    def sync_theme_menu(self, dark: bool, accent_color: str) -> None:
+        self.act_theme.setChecked(bool(dark))
+        target = (accent_color or "").lower()
+        for col_key, act in self._accent_actions.items():
+            act.setChecked(col_key == target)
 
     def update_recent_files(self, paths: list[str]) -> None:
         self.recent_menu.clear()

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pymupdf
+import pytest
 import shiboken6
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtTest import QTest
@@ -14,6 +15,28 @@ from app.ui.main_window import MainWindow
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 SQL_PDF = FIXTURES / "SQL Server Advanced Concepts.pdf"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_qsettings(monkeypatch):
+    """Prevent GUI tests from reading or mutating user Windows Registry settings."""
+    store: dict[str, object] = {}
+
+    class _IsolatedSettings:
+        def __init__(self, *a, **kw):
+            pass
+
+        def value(self, key, default=None):
+            return store.get(key, default)
+
+        def setValue(self, key, val):
+            store[key] = val
+
+        def sync(self):
+            pass
+
+    monkeypatch.setattr("app.ui.main_window.QSettings", _IsolatedSettings)
+    return store
 
 
 def test_gui_load_search_theme_and_sequential_in_place_editing(qtbot, tmp_path):
@@ -1340,3 +1363,36 @@ def test_unedited_edit_text_click_does_not_commit_or_rearrange(qtbot):
     assert tab.engine.page_count == orig_pages
     assert [(b.plain_text, b.rect) for b in tab.engine.extract_text_blocks(0)] == orig_p0
     assert [(b.plain_text, b.rect) for b in tab.engine.extract_text_blocks(1)] == orig_p1
+
+
+def test_theme_and_accent_persist_across_restarts(qtbot, _isolate_qsettings):
+    win1 = MainWindow()
+    qtbot.addWidget(win1)
+    assert win1.dark_theme is False
+    assert win1.accent_color == "#ea2e3f"
+    assert not win1.ribbon.act_theme.isChecked()
+    assert win1.ribbon._accent_actions["#ea2e3f"].isChecked()
+
+    win1.toggle_theme()
+    win1.set_accent_theme("#2563eb", "#1d4ed8")
+    assert _isolate_qsettings["darkTheme"] is True
+    assert _isolate_qsettings["accentColor"] == "#2563eb"
+    win1.close()
+
+    # Re-open a fresh MainWindow sharing the persisted QSettings store
+    win2 = MainWindow()
+    qtbot.addWidget(win2)
+    assert win2.dark_theme is True
+    assert win2.accent_color == "#2563eb"
+    assert win2.accent_hover == "#1d4ed8"
+    assert win2.ribbon.act_theme.isChecked()
+    assert win2.ribbon._accent_actions["#2563eb"].isChecked()
+    win2.close()
+
+    # Verify INI/Registry string booleans ("false") parse accurately
+    _isolate_qsettings["darkTheme"] = "false"
+    win3 = MainWindow()
+    qtbot.addWidget(win3)
+    assert win3.dark_theme is False
+    assert not win3.ribbon.act_theme.isChecked()
+    win3.close()
