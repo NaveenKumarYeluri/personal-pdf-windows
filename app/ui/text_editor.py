@@ -67,20 +67,27 @@ class InPlaceTextEditor(QTextEdit):
             """
         )
 
-        # Base font scaled visually by zoom
+        # Base font scaled visually by zoom (keep regular weight/style so Qt preserves <b>/<i> inline!)
         base_font = QFont(block.font_family)
         base_font.setPointSizeF(max(6.0, block.font_size * zoom))
-        base_font.setBold(block.is_bold)
-        base_font.setItalic(block.is_italic)
         self.setFont(base_font)
 
         # Populate rich HTML scaled cleanly for screen display
         self.setHtml(self._scale_html_for_display(block.html, zoom))
         self._apply_compact_block_format()
 
+        self.document().setModified(False)
+        self._format_modified = False
+        self._initial_plain_text = self.toPlainText().strip()
+        self._initial_unscaled_html = self.export_unscaled_html()
+
         self.document().contentsChanged.connect(self._on_contents_changed)
         self.cursorPositionChanged.connect(self.formatStateChanged.emit)
         self.selectionChanged.connect(self.formatStateChanged.emit)
+
+    def has_user_changes(self) -> bool:
+        """Return True only when text content or formatting was actually modified."""
+        return bool(self.document().isModified() or self._format_modified)
 
     def _scale_html_for_display(self, html: str, zoom: float) -> str:
         import re
@@ -110,6 +117,7 @@ class InPlaceTextEditor(QTextEdit):
 
     def sync_zoom(self, new_zoom: float) -> None:
         """Update visual font sizing and bounds when user zooms."""
+        was_modified = self.document().isModified()
         ratio = new_zoom / max(0.1, self.zoom)
         self.zoom = new_zoom
         cur = self.textCursor()
@@ -126,6 +134,7 @@ class InPlaceTextEditor(QTextEdit):
             max(26, int((y1 - y0) * new_zoom) + 6),
         )
         self._on_contents_changed()
+        self.document().setModified(was_modified)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if event.key() == Qt.Key_Escape:
@@ -176,6 +185,7 @@ class InPlaceTextEditor(QTextEdit):
         cur.mergeCharFormat(fmt)
         if covers_all:
             self.pdf_block.font_family = family
+        self._format_modified = True
         self.formatStateChanged.emit()
 
     def set_font_size_pt(self, size_pt: int) -> None:
@@ -186,6 +196,7 @@ class InPlaceTextEditor(QTextEdit):
         cur.mergeCharFormat(fmt)
         if covers_all:
             self.pdf_block.font_size = float(size_pt)
+        self._format_modified = True
         self._on_contents_changed()
         self.formatStateChanged.emit()
 
@@ -196,6 +207,7 @@ class InPlaceTextEditor(QTextEdit):
         fmt = QTextCharFormat()
         fmt.setFontWeight(QFont.Bold if target else QFont.Normal)
         cur.mergeCharFormat(fmt)
+        self._format_modified = True
         self.formatStateChanged.emit()
 
     def toggle_italic(self, active: bool | None = None) -> None:
@@ -205,6 +217,7 @@ class InPlaceTextEditor(QTextEdit):
         fmt = QTextCharFormat()
         fmt.setFontItalic(target)
         cur.mergeCharFormat(fmt)
+        self._format_modified = True
         self.formatStateChanged.emit()
 
     def toggle_underline(self, active: bool | None = None) -> None:
@@ -214,6 +227,7 @@ class InPlaceTextEditor(QTextEdit):
         fmt = QTextCharFormat()
         fmt.setFontUnderline(target)
         cur.mergeCharFormat(fmt)
+        self._format_modified = True
         self.formatStateChanged.emit()
 
     def toggle_strike(self, active: bool | None = None) -> None:
@@ -223,6 +237,7 @@ class InPlaceTextEditor(QTextEdit):
         fmt = QTextCharFormat()
         fmt.setFontStrikeOut(target)
         cur.mergeCharFormat(fmt)
+        self._format_modified = True
         self.formatStateChanged.emit()
 
     def set_text_color(self, color_hex: str) -> None:
@@ -233,6 +248,7 @@ class InPlaceTextEditor(QTextEdit):
         cur.mergeCharFormat(fmt)
         if covers_all:
             self.pdf_block.color_hex = color_hex
+        self._format_modified = True
         self.formatStateChanged.emit()
 
     def set_alignment(self, align: str) -> None:
@@ -248,6 +264,7 @@ class InPlaceTextEditor(QTextEdit):
         bfmt = QTextBlockFormat()
         bfmt.setAlignment(mapping.get(align, Qt.AlignLeft))
         cur.mergeBlockFormat(bfmt)
+        self._format_modified = True
 
     def current_format_state(self) -> dict:
         cur = self.textCursor()

@@ -319,3 +319,64 @@ def test_clear_block_to_empty_and_vector_find_replace():
     ]
     assert any("16 KB extents" in sp["text"] and (sp["flags"] & 16 or "bold" in sp["font"].lower()) for sp in spans)
     doc.close()
+
+
+def test_heading_edit_preserves_bold_and_does_not_shift_page():
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+    from app.core.pdf_engine import qt_html_to_clean_html
+    from app.ui.text_editor import InPlaceTextEditor
+
+    _app = QApplication.instance() or QApplication([])
+    raw = SQL_PDF.read_bytes()
+    eng = PDFDocumentEngine(raw, "SQL.pdf")
+    orig_pages = eng.page_count
+    blocks_p1 = eng.extract_text_blocks(0)
+    heading = next(b for b in blocks_p1 if "Physical Implementation:" in b.plain_text)
+    below_y0 = next(b for b in blocks_p1 if "Physically, SQL Server tables" in b.plain_text).rect[1]
+    bottom_y0 = next(b for b in blocks_p1 if "When you store data" in b.plain_text).rect[1]
+
+    ed = InPlaceTextEditor(heading, zoom=1.4)
+    ed.selectAll()
+    QTest.keyClicks(ed, "Physical Design:")
+    clean_html = qt_html_to_clean_html(
+        ed.export_unscaled_html(),
+        default_font=heading.font_family,
+        default_size_pt=heading.font_size,
+        default_color=heading.color_hex,
+        line_height_ratio=heading.line_height_ratio,
+    )
+    eng.set_in_place_edit(
+        TextEditOp(
+            edit_id="head1",
+            page_idx=0,
+            orig_rect=heading.rect,
+            target_rect=heading.rect,
+            original_text=heading.plain_text,
+            original_html=heading.html,
+            new_text="Physical Design:",
+            new_html=clean_html,
+            font_family=heading.font_family,
+            font_size=heading.font_size,
+            color_hex=heading.color_hex,
+            line_height_ratio=heading.line_height_ratio,
+            reflow_enabled=True,
+            block_id=heading.block_id,
+        )
+    )
+    out = eng.build_final_pdf_bytes()
+    doc = pymupdf.open(stream=out, filetype="pdf")
+    assert len(doc) == orig_pages
+    spans = [
+        sp
+        for b in doc[0].get_text("dict")["blocks"]
+        if b["type"] == 0
+        for ln in b["lines"]
+        for sp in ln["spans"]
+    ]
+    assert any("Physical Design:" in sp["text"] and (sp["flags"] & 16 or "bold" in sp["font"].lower()) for sp in spans)
+    doc.close()
+
+    after_p1 = eng.extract_text_blocks(0)
+    assert abs(next(b for b in after_p1 if "Physically, SQL Server tables" in b.plain_text).rect[1] - below_y0) < 0.5
+    assert abs(next(b for b in after_p1 if "When you store data" in b.plain_text).rect[1] - bottom_y0) < 0.5

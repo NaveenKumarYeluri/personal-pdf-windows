@@ -116,8 +116,15 @@ def qt_html_to_clean_html(
     Convert Qt QTextEdit HTML into clean, compact HTML+CSS suitable for MuPDF's Story/htmlbox
     while preserving bold, italic, underline, strikethrough, colors, font sizes, and alignment.
     """
-    body_match = re.search(r"<body[^>]*>(.*)</body>", raw_html or "", re.S | re.I)
-    inner = body_match.group(1).strip() if body_match else (raw_html or "").strip()
+    body_match = re.search(r"<body([^>]*)>(.*)</body>", raw_html or "", re.S | re.I)
+    body_attrs = body_match.group(1) if body_match else ""
+    inner = body_match.group(2).strip() if body_match else (raw_html or "").strip()
+
+    extra_body_css = ""
+    if re.search(r"font-weight\s*:\s*(?:bold|[6-9]\d{2})\b", body_attrs, re.I):
+        extra_body_css += "font-weight:bold;"
+    if re.search(r"font-style\s*:\s*italic\b", body_attrs, re.I):
+        extra_body_css += "font-style:italic;"
 
     # Strip Qt-specific inline CSS properties and huge default <p> margins
     inner = re.sub(r"-qt-[a-zA-Z0-9-]+\s*:[^;\"]*;?", "", inner)
@@ -131,7 +138,7 @@ def qt_html_to_clean_html(
     return (
         f'<div style="font-family:\'{html_lib.escape(default_font)}\',sans-serif;'
         f'font-size:{default_size_pt:.1f}pt;color:{html_lib.escape(default_color)};'
-        f'line-height:{line_height_ratio:.2f};">{inner}</div>'
+        f'line-height:{line_height_ratio:.2f};{extra_body_css}">{inner}</div>'
     )
 
 
@@ -1147,17 +1154,71 @@ class PDFDocumentEngine:
                 else:
                     matched_edits[op.block_id] = op
 
+            def _effective_edit_bounds(op: TextEditOp) -> tuple[float, float]:
+                tx0, ty0, tx1, ty1 = op.target_rect
+                # Keep wide/centered boxes exact, but allow horizontal headroom for tight single-line spans
+                if (tx1 - tx0) >= page_w * 0.65 or "\n" in (op.original_text or ""):
+                    return tx0, max(tx0 + 40.0, tx1)
+                right_limit = page_w - 36.0
+                for ob in orig_blocks:
+                    if ob.block_id == op.block_id:
+                        continue
+                    if ob.rect[3] >= ty0 - 2.0 and ob.rect[1] <= ty1 + 2.0 and ob.rect[0] >= tx1 - 2.0:
+                        right_limit = min(right_limit, ob.rect[0] - 8.0)
+                for img_info in orig_images:
+                    ib = img_info["bbox"]
+                    if float(ib[3]) >= ty0 - 2.0 and float(ib[1]) <= ty1 + 2.0 and float(ib[0]) >= tx1 - 2.0:
+                        right_limit = min(right_limit, float(ib[0]) - 8.0)
+                if "text-align:center" in (op.new_html or "").lower() or "align=\"center\"" in (op.new_html or "").lower():
+                    left_limit = 36.0
+                    for ob in orig_blocks:
+                        if ob.block_id != op.block_id and ob.rect[3] >= ty0 - 2.0 and ob.rect[1] <= ty1 + 2.0 and ob.rect[2] <= tx0 + 2.0:
+                            left_limit = max(left_limit, ob.rect[2] + 8.0)
+                    pad = min(14.0, max(0.0, tx0 - left_limit), max(0.0, right_limit - tx1))
+                    return tx0 - pad, max(tx0 - pad + 40.0, tx1 + pad)
+                eff_x1 = min(right_limit, tx1 + 24.0) if right_limit > tx1 else tx1
+                return tx0, max(tx0 + 40.0, eff_x1)
+
+            def _next_downstream_y0(op: TextEditOp) -> float | None:
+                ex0, ex1, ey1 = op.orig_rect[0], op.orig_rect[2], op.orig_rect[3]
+                wide = (ex1 - ex0) > (page_w * 0.5)
+                nearest: float | None = None
+                for ob in orig_blocks:
+                    if ob.block_id == op.block_id:
+                        continue
+                    oy0 = ob.rect[1]
+                    if oy0 >= ey1 - 4.0 and (wide or not (ob.rect[2] < ex0 - 20.0 or ob.rect[0] > ex1 + 20.0)):
+                        nearest = oy0 if nearest is None else min(nearest, oy0)
+                for img_info in orig_images:
+                    ib = img_info["bbox"]
+                    iy0 = float(ib[1])
+                    if iy0 >= ey1 - 4.0 and (wide or not (float(ib[2]) < ex0 - 20.0 or float(ib[0]) > ex1 + 20.0)):
+                        nearest = iy0 if nearest is None else min(nearest, iy0)
+                return nearest
+
             # Build vertical shift map from edited blocks
             shift_events: list[tuple[float, float, float, float]] = []  # (orig_x0, orig_x1, orig_y1, delta_y)
+            eff_bounds_by_id: dict[str, tuple[float, float]] = {}
             for op in matched_edits.values():
+                eff_x0, eff_x1 = _effective_edit_bounds(op)
+                eff_bounds_by_id[op.block_id] = (eff_x0, eff_x1)
                 if not op.new_text.strip():
                     continue
-                w = max(40.0, op.target_rect[2] - op.target_rect[0])
+                w = max(40.0, eff_x1 - eff_x0)
                 orig_h = max(12.0, op.orig_rect[3] - op.orig_rect[1])
                 new_h = measure_html_height(op.new_html, w)
-                delta = max(0.0, new_h - orig_h) if op.reflow_enabled else 0.0
-                if delta > 0.5:
-                    shift_events.append((op.orig_rect[0], op.orig_rect[2], op.orig_rect[3], delta))
+                if not op.reflow_enabled:
+                    continue
+                next_y0 = _next_downstream_y0(op)
+                if next_y0 is None:
+                    continue
+                orig_gap = max(0.0, next_y0 - op.orig_rect[3])
+                keep_gap = min(PARA_GAP, max(2.0, orig_gap))
+                # Subtract ~3pt trailing <p> margin from measure_html_height when checking collision
+                visual_bottom = op.target_rect[1] + max(orig_h, new_h - 3.0)
+                needed_delta = (visual_bottom + keep_gap) - next_y0
+                if needed_delta > 0.5:
+                    shift_events.append((op.orig_rect[0], op.orig_rect[2], op.orig_rect[3], needed_delta))
 
             def _cumulative_shift(x0: float, x1: float, y0: float) -> float:
                 total = incoming_shift
@@ -1275,8 +1336,11 @@ class PDFDocumentEngine:
                     redact_text_rects.append(pymupdf.Rect(blk.rect))
                     if op is not None and not op.new_text.strip():
                         continue
-                    tx0 = op.target_rect[0] if op else blk.rect[0]
-                    tx1 = op.target_rect[2] if op else min(page_w - 36.0, blk.rect[2] + 12.0)
+                    if op is not None:
+                        tx0, tx1 = eff_bounds_by_id.get(op.block_id, (op.target_rect[0], op.target_rect[2]))
+                    else:
+                        tx0 = blk.rect[0]
+                        tx1 = min(page_w - 36.0, blk.rect[2] + 12.0)
                     ty0 = (op.target_rect[1] if op else blk.rect[1]) + shift
                     w = max(40.0, tx1 - tx0)
                     h_html = op.new_html if op else blk.html

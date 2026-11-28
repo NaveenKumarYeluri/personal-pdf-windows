@@ -1297,3 +1297,46 @@ def test_left_rail_and_context_ribbon_active_highlighting(qtbot):
     qtbot.wait(10)
     assert _bg_hex(win.left_rail.btn_pan) == accent_hex
     assert _has_white_icon_pixel(win.left_rail.btn_pan, 16)
+
+
+def test_unedited_edit_text_click_does_not_commit_or_rearrange(qtbot):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+
+    tab = win.open_pdf_path(str(SQL_PDF))
+    assert tab is not None
+    orig_pages = tab.engine.page_count
+    orig_p0 = [(b.plain_text, b.rect) for b in tab.engine.extract_text_blocks(0)]
+    orig_p1 = [(b.plain_text, b.rect) for b in tab.engine.extract_text_blocks(1)]
+
+    win.set_mode("edit")
+    pw0 = tab.page_widgets[0]
+
+    # Click bold heading and body paragraph without editing, including Ctrl+A and zoom while editor open
+    for needle in ("Physical Implementation:", "Physically, SQL Server tables"):
+        blk = next(b for b in tab.engine.extract_text_blocks(0) if needle in b.plain_text)
+        cx = int(((blk.rect[0] + blk.rect[2]) / 2.0) * pw0.zoom)
+        cy = int(((blk.rect[1] + blk.rect[3]) / 2.0) * pw0.zoom)
+        QTest.mouseClick(pw0, Qt.LeftButton, Qt.NoModifier, QPoint(cx, cy))
+        assert pw0.active_editor is not None
+        QTest.keyClick(pw0.active_editor, Qt.Key_A, Qt.ControlModifier)
+        win.step_zoom(1.1)
+
+    win.floating_bar.btn_done.click()
+    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert pw0.active_editor is None
+
+    # Opening Add Text and clicking Done without typing leaves no placeholder behind
+    win._set_active_tool("add_text")
+    QTest.mouseClick(pw0, Qt.LeftButton, Qt.NoModifier, QPoint(int(80 * pw0.zoom), int(480 * pw0.zoom)))
+    assert pw0.active_editor is not None
+    win.floating_bar.btn_done.click()
+    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+    assert tab.engine.in_place_edits == {}
+    assert tab.dirty is False
+    assert tab.undo_stack == []
+    assert tab.engine.page_count == orig_pages
+    assert [(b.plain_text, b.rect) for b in tab.engine.extract_text_blocks(0)] == orig_p0
+    assert [(b.plain_text, b.rect) for b in tab.engine.extract_text_blocks(1)] == orig_p1

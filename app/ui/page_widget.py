@@ -438,20 +438,19 @@ class PDFPageWidget(QWidget):
             return None
 
         blk = ed.pdf_block
+        user_modified = ed.has_user_changes()
         new_text = ed.toPlainText().strip()
-        raw_unscaled = ed.export_unscaled_html()
-        clean_html = qt_html_to_clean_html(
-            raw_unscaled,
-            default_font=blk.font_family,
-            default_size_pt=blk.font_size,
-            default_color=blk.color_hex,
-            line_height_ratio=blk.line_height_ratio,
-        )
+        raw_unscaled = ed.export_unscaled_html() if user_modified else ""
+        initial_plain = getattr(ed, "_initial_plain_text", blk.plain_text.strip())
+        initial_unscaled = getattr(ed, "_initial_unscaled_html", "")
         reflow_flag = ed.reflow_enabled
         is_new = ed.is_new_block
         ed.hide()
         ed.deleteLater()
         self.inPlaceEditorClosed.emit(self, ed)
+
+        if not user_modified:
+            return None
 
         target_page_idx = blk.base_page_idx if blk.base_page_idx >= 0 else self.page_idx
         target_block_id = blk.base_block_id or blk.block_id
@@ -462,8 +461,29 @@ class PDFPageWidget(QWidget):
         if is_new and not new_text and not already_committed:
             return None
 
+        clean_html = qt_html_to_clean_html(
+            raw_unscaled,
+            default_font=blk.font_family,
+            default_size_pt=blk.font_size,
+            default_color=blk.color_hex,
+            line_height_ratio=blk.line_height_ratio,
+        )
+        initial_clean_html = (
+            qt_html_to_clean_html(
+                initial_unscaled,
+                default_font=blk.font_family,
+                default_size_pt=blk.font_size,
+                default_color=blk.color_hex,
+                line_height_ratio=blk.line_height_ratio,
+            )
+            if initial_unscaled
+            else blk.html
+        )
+
         # Skip committing unchanged blocks (including already-committed added blocks)
-        if (not is_new or already_committed) and new_text == blk.plain_text.strip() and clean_html == blk.html:
+        if (not is_new or already_committed) and new_text == initial_plain and (
+            clean_html == initial_clean_html or clean_html == blk.html
+        ):
             return None
 
         op = TextEditOp(
@@ -695,7 +715,7 @@ class PDFPageWidget(QWidget):
 
         if self.active_tool == "edit_text" and (self.rotation % 360) == 0:
             blk = self.engine.find_block_at(self.page_idx, px, py)
-            if blk != self._hover_block:
+            if blk is not self._hover_block:
                 self._hover_block = blk
                 self.setCursor(Qt.IBeamCursor if blk else Qt.ArrowCursor)
                 self.update()
