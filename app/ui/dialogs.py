@@ -486,31 +486,91 @@ class SignatureDialog(QDialog):
         self.accept()
 
 
+def _style_color_swatch_btn(btn: QPushButton, color_hex: str) -> None:
+    col = QColor(color_hex or "#000000")
+    lum = 0.299 * col.red() + 0.587 * col.green() + 0.114 * col.blue()
+    fg = "#0f172a" if lum > 150 else "#ffffff"
+    btn.setText(col.name().upper())
+    btn.setStyleSheet(
+        f"background-color: {col.name()}; color: {fg}; border: 1px solid #64748b; "
+        "border-radius: 5px; padding: 4px 10px; font-weight: 600;"
+    )
+
+
 class WatermarkDialog(QDialog):
-    def __init__(self, parent: QWidget | None = None):
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        editing: bool = False,
+        text: str = "CONFIDENTIAL",
+        font_family: str = "Arial",
+        font_size: int = 48,
+        angle: int = -45,
+        opacity_pct: int = 25,
+        color_hex: str = "#ff0000",
+        pos_x: float = 0.0,
+        pos_y: float = 0.0,
+    ):
         super().__init__(parent)
-        self.setWindowTitle("Add Watermark")
-        self.color_hex = "#ff0000"
+        self.setWindowTitle("Edit Watermark Properties" if editing else "Add Watermark")
+        self.color_hex = color_hex
+        self._editing = editing
         form = QFormLayout(self)
 
-        self.txt = QLineEdit("CONFIDENTIAL")
-        self.angle = QComboBox()
-        self.angle.addItems(["45", "0", "-45", "90"])
+        self.txt = QLineEdit(text)
+        self.font_combo = QComboBox()
+        fonts = available_ui_fonts()
+        self.font_combo.addItems(fonts)
+        f_idx = self.font_combo.findText(font_family, Qt.MatchFixedString)
+        if f_idx >= 0:
+            self.font_combo.setCurrentIndex(f_idx)
+
+        self.size = QSpinBox()
+        self.size.setRange(10, 160)
+        self.size.setValue(int(round(font_size)))
+        self.size.setSuffix(" pt")
+
+        self.angle = QSpinBox()
+        self.angle.setRange(-180, 180)
+        self.angle.setValue(int(round(angle)))
+        self.angle.setSuffix("°")
+
         self.opacity = QSpinBox()
         self.opacity.setRange(5, 100)
-        self.opacity.setValue(25)
+        self.opacity.setValue(int(round(opacity_pct)))
         self.opacity.setSuffix("%")
-        self.size = QSpinBox()
-        self.size.setRange(12, 140)
-        self.size.setValue(48)
-        self.btn_col = QPushButton(self.color_hex)
+
+        self.btn_col = QPushButton()
+        _style_color_swatch_btn(self.btn_col, self.color_hex)
         self.btn_col.clicked.connect(self._pick_col)
 
         form.addRow("Watermark Text:", self.txt)
-        form.addRow("Angle (deg):", self.angle)
-        form.addRow("Opacity:", self.opacity)
+        form.addRow("Font:", self.font_combo)
         form.addRow("Font Size:", self.size)
+        form.addRow("Rotation Angle:", self.angle)
+        form.addRow("Opacity:", self.opacity)
         form.addRow("Color:", self.btn_col)
+
+        if editing:
+            self.pos_x = QSpinBox()
+            self.pos_x.setRange(0, 5000)
+            self.pos_x.setValue(int(round(pos_x)))
+            self.pos_x.setSuffix(" pt")
+            self.pos_y = QSpinBox()
+            self.pos_y.setRange(0, 5000)
+            self.pos_y.setValue(int(round(pos_y)))
+            self.pos_y.setSuffix(" pt")
+            pos_row = QHBoxLayout()
+            pos_row.addWidget(QLabel("X:"))
+            pos_row.addWidget(self.pos_x)
+            pos_row.addWidget(QLabel("Y:"))
+            pos_row.addWidget(self.pos_y)
+            form.addRow("Center Position:", pos_row)
+        else:
+            self.scope_combo = QComboBox()
+            self.scope_combo.addItems(["All Pages", "Current Page Only"])
+            form.addRow("Apply To:", self.scope_combo)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(self.accept)
@@ -521,7 +581,7 @@ class WatermarkDialog(QDialog):
         c = QColorDialog.getColor(QColor(self.color_hex), self, "Watermark Color")
         if c.isValid():
             self.color_hex = c.name()
-            self.btn_col.setText(self.color_hex)
+            _style_color_swatch_btn(self.btn_col, self.color_hex)
 
 
 class BatesDialog(QDialog):

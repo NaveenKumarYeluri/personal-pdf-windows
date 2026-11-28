@@ -267,8 +267,16 @@ class SidebarPanel(QFrame):
                 )
         for pno, stps in sorted(self._engine.stamps.items()):
             for stp in stps:
-                lbl = stp.text if stp.kind == "stamp" else "Signature/Image"
-                self._add_annot_item(f"📌 {lbl} (p.{pno + 1})", pno, "stamp", stp, stp.rect)
+                if stp.kind == "watermark":
+                    lbl = f"Watermark: {stp.text}"
+                    prefix = "💧"
+                elif stp.kind == "stamp":
+                    lbl = stp.text
+                    prefix = "📌"
+                else:
+                    lbl = "Signature/Image"
+                    prefix = "📌"
+                self._add_annot_item(f"{prefix} {lbl} (p.{pno + 1})", pno, "stamp", stp, stp.rect)
         for pno, tbs in sorted(self._engine.text_boxes.items()):
             for tb in tbs:
                 self._add_annot_item(

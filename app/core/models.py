@@ -152,16 +152,17 @@ class FloatingTextBox:
 
 @dataclass
 class StampItem:
-    """Text stamp, signature image, or uploaded image overlay."""
+    """Text stamp, watermark, signature image, or uploaded image overlay."""
 
     page_idx: int
-    kind: str  # "stamp" or "image"
+    kind: str  # "stamp", "watermark", or "image"
     rect: tuple[float, float, float, float]
     text: str = ""
     color_hex: str = "#dc2626"
     font_size: float = 18.0
     opacity: float = 0.85
     rotation: float = -8.0
+    font_family: str = "Arial"
     image_bytes: bytes | None = None
     locked: bool = False
     item_id: str = field(default_factory=_new_id)

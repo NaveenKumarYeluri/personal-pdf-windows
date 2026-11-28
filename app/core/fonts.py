@@ -83,6 +83,25 @@ def _read_font_bytes(filename: str) -> bytes | None:
         return None
 
 
+def resolve_mupdf_font(family: str = "Arial", bold: bool = True) -> pymupdf.Font:
+    """Resolve a UI font family into a MuPDF Font suitable for TextWriter."""
+    canon, parsed_bold, _ = resolve_pdf_font_name(family or "Arial")
+    want_bold = bool(bold or parsed_bold)
+    if os.path.isdir(WINDOWS_FONTS_DIR):
+        reg, b_file, _ital, _bi = _font_variants_for_family(canon)
+        buf = _read_font_bytes(b_file if want_bold else reg) or _read_font_bytes(reg)
+        if buf:
+            try:
+                return pymupdf.Font(fontbuffer=buf)
+            except Exception:
+                pass
+    if canon == "Times New Roman":
+        return pymupdf.Font("tibo" if want_bold else "tiro")
+    if canon in ("Courier New", "Consolas"):
+        return pymupdf.Font("cobo" if want_bold else "cour")
+    return pymupdf.Font("hebo" if want_bold else "helv")
+
+
 def _font_variants_for_family(family: str) -> tuple[str, str, str, str]:
     # Windows calibri.ttf substitutes 'ti' -> U+019F (Ɵ) in MuPDF HarfBuzz PDF export;
     # map Calibri PDF export to Segoe UI so exported PDFs stay 100% searchable & clean.

@@ -17,6 +17,7 @@ from app.core.fonts import (
     build_mupdf_font_css,
     get_font_resources_for_html,
     get_windows_font_archive,
+    resolve_mupdf_font,
     resolve_pdf_font_name,
 )
 from app.core.ligatures import heal_pdf_text
@@ -1659,28 +1660,37 @@ class PDFDocumentEngine:
                             cy + r.width / 2.0,
                         )
                     page.insert_image(target_r, stream=stp.image_bytes, rotate=mupdf_rot, keep_proportion=True)
-                elif stp.kind == "stamp" and stp.text:
+                elif stp.kind in ("stamp", "watermark") and stp.text:
                     col = _hex_to_rgb01(stp.color_hex)
-                    shape = page.new_shape()
-                    shape.draw_rect(r)
-                    shape.finish(color=col, width=2.5, stroke_opacity=stp.opacity)
-                    shape.commit()
-                    tw = pymupdf.TextWriter(page.rect)
-                    font = pymupdf.Font("hebo")
-                    fsize = stp.font_size
-                    text_w = font.text_length(stp.text, fontsize=fsize)
-                    while text_w > (r.width - 10) and fsize > 8:
-                        fsize -= 1
-                        text_w = font.text_length(stp.text, fontsize=fsize)
                     cx = (r.x0 + r.x1) / 2.0
                     cy = (r.y0 + r.y1) / 2.0
-                    rad = math.radians(stp.rotation)
-                    dx = -(text_w / 2.0) * math.cos(rad) + (fsize * 0.35) * math.sin(rad)
-                    dy = (text_w / 2.0) * math.sin(rad) + (fsize * 0.35) * math.cos(rad)
-                    origin = pymupdf.Point(cx + dx, cy + dy)
-                    mat = pymupdf.Matrix(
-                        math.cos(-rad), math.sin(-rad), -math.sin(-rad), math.cos(-rad), 0, 0
+                    theta = math.radians(stp.rotation)
+                    cos_t, sin_t = math.cos(theta), math.sin(theta)
+                    if stp.kind == "stamp":
+                        hw, hh = max(4.0, r.width / 2.0), max(4.0, r.height / 2.0)
+                        corners = [
+                            pymupdf.Point(cx + lx * cos_t - ly * sin_t, cy + lx * sin_t + ly * cos_t)
+                            for lx, ly in [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]
+                        ]
+                        shape = page.new_shape()
+                        shape.draw_polyline(corners)
+                        shape.finish(color=col, width=2.5, stroke_opacity=stp.opacity, closePath=True)
+                        shape.commit()
+                    tw = pymupdf.TextWriter(page.rect)
+                    font = resolve_mupdf_font(getattr(stp, "font_family", "Arial"), bold=True)
+                    fsize = max(6.0, float(stp.font_size))
+                    text_w = font.text_length(stp.text, fontsize=fsize)
+                    max_w = max(12.0, r.width - (10.0 if stp.kind == "stamp" else 4.0))
+                    while text_w > max_w and fsize > 6.0:
+                        fsize = max(6.0, fsize - 1.0)
+                        text_w = font.text_length(stp.text, fontsize=fsize)
+                    lx = -(text_w / 2.0)
+                    ly = fsize * 0.35
+                    origin = pymupdf.Point(
+                        cx + lx * cos_t - ly * sin_t,
+                        cy + lx * sin_t + ly * cos_t,
                     )
+                    mat = pymupdf.Matrix(cos_t, -sin_t, sin_t, cos_t, 0, 0)
                     tw.append(origin, stp.text, font=font, fontsize=fsize)
                     tw.write_text(page, color=col, opacity=stp.opacity, morph=(origin, mat))
 

@@ -1396,3 +1396,81 @@ def test_theme_and_accent_persist_across_restarts(qtbot, _isolate_qsettings):
     assert win3.dark_theme is False
     assert not win3.ribbon.act_theme.isChecked()
     win3.close()
+
+
+def test_edit_watermark_is_movable_editable_and_undoable(qtbot, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+    from app.ui.dialogs import WatermarkDialog
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+    tab = win.load_sample_pdf()
+    assert tab is not None and tab.engine.page_count == 2
+    pw0 = tab.page_widgets[0]
+    win.set_mode("edit")
+
+    orig_wm_init = WatermarkDialog.__init__
+
+    def _mock_add_exec(self_dlg):
+        self_dlg.txt.setText("CONFIDENTIAL")
+        self_dlg.font_combo.setCurrentText("Georgia")
+        self_dlg.size.setValue(40)
+        self_dlg.angle.setValue(-35)
+        self_dlg.opacity.setValue(40)
+        self_dlg.color_hex = "#2563eb"
+        self_dlg.scope_combo.setCurrentIndex(0)
+        return QDialog.Accepted
+
+    monkeypatch.setattr(WatermarkDialog, "exec", _mock_add_exec)
+    win._on_tool_action("open_watermark", {})
+
+    assert len(tab.engine.stamps.get(0, [])) == 1
+    assert len(tab.engine.stamps.get(1, [])) == 1
+    wm0 = tab.engine.stamps[0][0]
+    assert wm0.kind == "watermark"
+    assert wm0.font_family == "Georgia"
+    assert pw0.selected_item is wm0
+
+    # Drag watermark directly in Edit mode to move position
+    cx0 = (wm0.rect[0] + wm0.rect[2]) / 2.0
+    cy0 = (wm0.rect[1] + wm0.rect[3]) / 2.0
+    p_start = QPoint(int(cx0 * pw0.zoom), int(cy0 * pw0.zoom))
+    p_end = QPoint(int((cx0 + 50.0) * pw0.zoom), int((cy0 + 40.0) * pw0.zoom))
+    QTest.mousePress(pw0, Qt.LeftButton, Qt.NoModifier, p_start)
+    QTest.mouseMove(pw0, p_end)
+    QTest.mouseRelease(pw0, Qt.LeftButton, Qt.NoModifier, p_end)
+    assert (wm0.rect[0] + wm0.rect[2]) / 2.0 > cx0 + 25.0
+
+    # Double-click watermark to edit text, font, size, color, opacity, angle
+    def _mock_edit_exec(self_dlg):
+        assert self_dlg._editing is True
+        self_dlg.txt.setText("TOP SECRET")
+        self_dlg.font_combo.setCurrentText("Times New Roman")
+        self_dlg.size.setValue(54)
+        self_dlg.angle.setValue(-15)
+        self_dlg.opacity.setValue(60)
+        self_dlg.color_hex = "#059669"
+        return QDialog.Accepted
+
+    monkeypatch.setattr(WatermarkDialog, "exec", _mock_edit_exec)
+    QTest.mouseDClick(pw0, Qt.LeftButton, Qt.NoModifier, p_end)
+    assert wm0.text == "TOP SECRET"
+    assert wm0.font_family == "Times New Roman"
+    assert wm0.font_size == 54.0
+    assert wm0.rotation == -15.0
+    assert abs(wm0.opacity - 0.60) < 0.01
+    assert wm0.color_hex == "#059669"
+
+    # Undo property edit, undo move, and undo batch watermark creation cleanly
+    win.undo()
+    assert wm0.text == "CONFIDENTIAL"
+    assert wm0.font_family == "Georgia"
+    win.undo()
+    assert abs((wm0.rect[0] + wm0.rect[2]) / 2.0 - cx0) < 1.0
+    win.undo()
+    assert tab.engine.stamps.get(0, []) == []
+    assert tab.engine.stamps.get(1, []) == []
+    win.redo()
+    assert len(tab.engine.stamps.get(0, [])) == 1
+    assert len(tab.engine.stamps.get(1, [])) == 1

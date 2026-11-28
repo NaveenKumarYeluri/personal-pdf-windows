@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 import pymupdf
 
+from app.core.fonts import resolve_mupdf_font
 from app.core.ligatures import heal_pdf_text
 
 A4_WIDTH = 595.28
@@ -167,6 +168,7 @@ def apply_watermark(
     opacity: float = 0.25,
     font_size: int = 48,
     color_hex: str = "#ff0000",
+    font_family: str = "Helvetica",
 ) -> bytes:
     """Apply a centered vector text watermark across every page of the document."""
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
@@ -176,7 +178,11 @@ def apply_watermark(
     fsize = max(10, min(160, int(font_size)))
     rad = math.radians(angle)
 
-    font = pymupdf.Font("helv")
+    font = (
+        pymupdf.Font("helv")
+        if (font_family or "").lower() in ("helv", "helvetica")
+        else resolve_mupdf_font(font_family, bold=True)
+    )
     text_w = font.text_length(label, fontsize=fsize)
     text_h = fsize * 0.72
 

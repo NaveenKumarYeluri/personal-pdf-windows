@@ -415,3 +415,35 @@ def test_edit_text_build_is_fast_with_curated_font_archive():
     eng.build_bytes_with_text_edits(raw)
     elapsed = time.perf_counter() - t0
     assert elapsed < 1.5, f"build_bytes_with_text_edits took {elapsed:.2f}s"
+
+
+def test_watermark_overlay_exports_with_custom_font_rotation_and_color():
+    from app.core.pdf_engine import create_blank_pdf_bytes
+
+    eng = PDFDocumentEngine(create_blank_pdf_bytes(), "wm.pdf")
+    wm = StampItem(
+        page_idx=0,
+        kind="watermark",
+        rect=(120.0, 320.0, 480.0, 420.0),
+        text="INTERNAL ONLY",
+        color_hex="#2563eb",
+        font_size=36.0,
+        opacity=0.45,
+        rotation=-30.0,
+        font_family="Times New Roman",
+    )
+    eng.stamps[0] = [wm]
+    out = eng.build_final_pdf_bytes()
+    doc = pymupdf.open(stream=out, filetype="pdf")
+    p = doc[0]
+    assert "INTERNAL ONLY" in p.get_text("text").replace("\xa0", " ")
+    spans = [
+        sp
+        for b in p.get_text("dict")["blocks"]
+        if b["type"] == 0
+        for ln in b["lines"]
+        for sp in ln["spans"]
+    ]
+    assert any("INTERNAL" in sp["text"] and f"#{sp['color']:06x}".lower() == "#2563eb" for sp in spans)
+    assert any("times" in sp["font"].lower() for sp in spans)
+    doc.close()

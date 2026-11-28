@@ -12,6 +12,7 @@ from PySide6.QtGui import (
     QColor,
     QContextMenuEvent,
     QFont,
+    QFontMetricsF,
     QImage,
     QKeyEvent,
     QMouseEvent,
@@ -309,7 +310,7 @@ class PDFPageWidget(QWidget):
         )
 
     def _hit_overlay_item(self, px: float, py: float) -> tuple[object | None, str]:
-        """Return (item, handle_mode) if (px, py) hits a stamp, textbox, whiteout, or redaction."""
+        """Return (item, handle_mode) if (px, py) hits a stamp, watermark, textbox, whiteout, or redaction."""
         candidates = (
             list(self.engine.stamps.get(self.page_idx, []))
             + list(self.engine.text_boxes.get(self.page_idx, []))
@@ -320,7 +321,17 @@ class PDFPageWidget(QWidget):
             x0, y0, x1, y1 = item.rect
             if abs(px - x1) <= 10 / self.zoom and abs(py - y1) <= 10 / self.zoom:
                 return item, "resize"
-            if x0 <= px <= x1 and y0 <= py <= y1:
+            rot = float(getattr(item, "rotation", 0.0) or 0.0)
+            if abs(rot) > 1e-3:
+                cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+                hw, hh = (x1 - x0) / 2.0, (y1 - y0) / 2.0
+                rad = math.radians(-rot)
+                dx, dy = px - cx, py - cy
+                lx = dx * math.cos(rad) - dy * math.sin(rad)
+                ly = dx * math.sin(rad) + dy * math.cos(rad)
+                if -hw <= lx <= hw and -hh <= ly <= hh:
+                    return item, "move"
+            elif x0 <= px <= x1 and y0 <= py <= y1:
                 return item, "move"
         return None, ""
 
@@ -905,6 +916,78 @@ class PDFPageWidget(QWidget):
                 return kind, lst
         return None, None
 
+    @staticmethod
+    def _stamp_state_snapshot(item: StampItem) -> dict:
+        return {
+            "rect": item.rect,
+            "text": item.text,
+            "color_hex": item.color_hex,
+            "font_size": item.font_size,
+            "opacity": item.opacity,
+            "rotation": item.rotation,
+            "font_family": getattr(item, "font_family", "Arial"),
+        }
+
+    @staticmethod
+    def compute_text_overlay_rect(
+        text: str,
+        font_family: str,
+        font_size: float,
+        cx: float,
+        cy: float,
+        kind: str = "watermark",
+    ) -> tuple[float, float, float, float]:
+        f = QFont(font_family or "Arial", max(8, int(round(font_size))), QFont.Bold)
+        fm = QFontMetricsF(f)
+        tw = max(40.0, fm.horizontalAdvance(text or "STAMP"))
+        th = max(float(font_size) * 1.25, fm.height())
+        pad_x = 24.0 if kind == "stamp" else 16.0
+        pad_y = 14.0 if kind == "stamp" else 10.0
+        hw = (tw + pad_x) / 2.0
+        hh = (th + pad_y) / 2.0
+        return (cx - hw, cy - hh, cx + hw, cy + hh)
+
+    def _edit_watermark_properties(self, item: StampItem) -> None:
+        from app.ui.dialogs import WatermarkDialog
+
+        x0, y0, x1, y1 = item.rect
+        cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+        dlg = WatermarkDialog(
+            self,
+            editing=True,
+            text=item.text,
+            font_family=getattr(item, "font_family", "Arial"),
+            font_size=int(round(item.font_size)),
+            angle=int(round(item.rotation)),
+            opacity_pct=int(round(item.opacity * 100.0)),
+            color_hex=item.color_hex or "#ff0000",
+            pos_x=cx,
+            pos_y=cy,
+        )
+        if not dlg.exec():
+            return
+        new_text = dlg.txt.text().strip() or item.text
+        new_font = dlg.font_combo.currentText() or "Arial"
+        new_size = float(dlg.size.value())
+        new_rot = float(dlg.angle.value())
+        new_opac = max(0.05, min(1.0, dlg.opacity.value() / 100.0))
+        new_col = dlg.color_hex
+        new_cx = float(dlg.pos_x.value())
+        new_cy = float(dlg.pos_y.value())
+        old_state = self._stamp_state_snapshot(item)
+        new_rect = self.compute_text_overlay_rect(new_text, new_font, new_size, new_cx, new_cy, kind="watermark")
+        item.text = new_text
+        item.font_family = new_font
+        item.font_size = new_size
+        item.rotation = new_rot
+        item.opacity = new_opac
+        item.color_hex = new_col
+        item.rect = new_rect
+        new_state = self._stamp_state_snapshot(item)
+        if new_state != old_state:
+            self.annotationModified.emit(self.page_idx, "stamp", item, "overlay_state", old_state, new_state)
+            self.update()
+
     def build_context_menu(self, pos: QPointF) -> QMenu:
         px, py = self._to_pdf_pt(pos)
         menu = QMenu(self)
@@ -930,7 +1013,26 @@ class PDFPageWidget(QWidget):
                     self.annotationModified.emit(self.page_idx, "stamp", item, "rotation", old_rot, new_rot)
                     self.update()
                 menu.addAction("Rotate Overlay 90° CW", _rot_stamp)
-                if hit.kind == "stamp":
+                if hit.kind == "watermark":
+                    act_wm_props = menu.addAction(
+                        "Edit Watermark Properties...",
+                        lambda _chk=False, item=hit: self._edit_watermark_properties(item),
+                    )
+                    act_wm_props.setEnabled(not getattr(hit, "locked", False))
+
+                    def _wm_color(_chk: bool = False, item: StampItem = hit) -> None:
+                        col = QColorDialog.getColor(QColor(item.color_hex or "#ff0000"), self, "Watermark Color")
+                        if col.isValid() and col.name().lower() != (item.color_hex or "#ff0000").lower():
+                            old_col = item.color_hex
+                            item.color_hex = col.name()
+                            self.annotationModified.emit(
+                                self.page_idx, "stamp", item, "color_hex", old_col, item.color_hex
+                            )
+                            self.update()
+
+                    act_wm_col = menu.addAction("Watermark Color...", _wm_color)
+                    act_wm_col.setEnabled(not getattr(hit, "locked", False))
+                elif hit.kind == "stamp":
                     def _edit_stamp(_chk: bool = False, item: StampItem = hit) -> None:
                         txt, ok = QInputDialog.getText(self, "Edit Stamp", "Stamp text:", text=item.text)
                         if ok and txt.strip() and txt.strip().upper() != item.text:
@@ -1064,14 +1166,18 @@ class PDFPageWidget(QWidget):
                 self.update()
             return
         hit, _ = self._hit_overlay_item(px, py)
-        if isinstance(hit, StampItem) and hit.kind == "stamp" and not hit.locked:
-            txt, ok = QInputDialog.getText(self, "Edit Stamp", "Stamp text:", text=hit.text)
-            if ok and txt.strip() and txt.strip().upper() != hit.text:
-                old_txt = hit.text
-                hit.text = txt.strip().upper()
-                self.annotationModified.emit(self.page_idx, "stamp", hit, "text", old_txt, hit.text)
-                self.update()
-            return
+        if isinstance(hit, StampItem) and not hit.locked:
+            if hit.kind == "watermark":
+                self._edit_watermark_properties(hit)
+                return
+            if hit.kind == "stamp":
+                txt, ok = QInputDialog.getText(self, "Edit Stamp", "Stamp text:", text=hit.text)
+                if ok and txt.strip() and txt.strip().upper() != hit.text:
+                    old_txt = hit.text
+                    hit.text = txt.strip().upper()
+                    self.annotationModified.emit(self.page_idx, "stamp", hit, "text", old_txt, hit.text)
+                    self.update()
+                return
         if self.active_tool == "select" and hit is None:
             if self._select_word_at(px, py):
                 return
@@ -1378,11 +1484,18 @@ class PDFPageWidget(QWidget):
                 pm = self._get_stamp_pixmap(stp)
                 if pm is not None:
                     painter.drawPixmap(local_rect, pm, QRectF(pm.rect()))
-            elif stp.kind == "stamp":
+            elif stp.kind in ("stamp", "watermark"):
                 pen = QPen(_qcolor(stp.color_hex), 2.5)
                 painter.setPen(pen)
-                painter.drawRect(local_rect)
-                f = QFont("Arial", max(8, int(stp.font_size * self.zoom)), QFont.Bold)
+                if stp.kind == "stamp":
+                    painter.drawRect(local_rect)
+                f = QFont(getattr(stp, "font_family", "Arial") or "Arial", max(6, int(round(stp.font_size * self.zoom))), QFont.Bold)
+                fm = QFontMetricsF(f)
+                max_w = max(12.0, local_rect.width() - (10.0 if stp.kind == "stamp" else 4.0))
+                tw = fm.horizontalAdvance(stp.text)
+                if tw > max_w and tw > 0:
+                    scaled_pt = max(6.0, stp.font_size * self.zoom * (max_w / tw))
+                    f.setPointSizeF(scaled_pt)
                 painter.setFont(f)
                 painter.drawText(local_rect, Qt.AlignCenter, stp.text)
             painter.restore()

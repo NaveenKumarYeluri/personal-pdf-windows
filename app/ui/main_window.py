@@ -43,7 +43,6 @@ from PySide6.QtWidgets import (
 from app.core.document_ops import (
     PageOp,
     apply_bates_numbering,
-    apply_watermark,
     encrypt_pdf_aes256,
     export_page_image,
     extract_clean_text,
@@ -1299,6 +1298,15 @@ class MainWindow(QMainWindow):
             if 0 <= entry.page_idx < len(tab.page_widgets):
                 tab.page_widgets[entry.page_idx].refresh_render()
             self.sidebar.refresh_thumbnails()
+        elif entry.kind == "stamp_batch":
+            for p_idx, stp in entry.payload:
+                lst = tab.engine.stamps.get(p_idx, [])
+                if stp in lst:
+                    lst.remove(stp)
+                if 0 <= p_idx < len(tab.page_widgets):
+                    if tab.page_widgets[p_idx].selected_item is stp:
+                        tab.page_widgets[p_idx].selected_item = None
+                    tab.page_widgets[p_idx].update()
         elif entry.action == "modify":
             store = self._store_for_kind(tab.engine, entry.kind)
             lst = store.setdefault(entry.page_idx, [])
@@ -1307,6 +1315,9 @@ class MainWindow(QMainWindow):
                     lst.remove(entry.payload)
                     idx = max(0, min(len(lst), entry.previous_payload))
                     lst.insert(idx, entry.payload)
+            elif entry.prop_name == "overlay_state" and isinstance(entry.previous_payload, dict):
+                for k, v in entry.previous_payload.items():
+                    setattr(entry.payload, k, v)
             elif entry.prop_name:
                 setattr(entry.payload, entry.prop_name, entry.previous_payload)
             if 0 <= entry.page_idx < len(tab.page_widgets):
@@ -1378,13 +1389,24 @@ class MainWindow(QMainWindow):
             if 0 <= entry.page_idx < len(tab.page_widgets):
                 tab.page_widgets[entry.page_idx].refresh_render()
             self.sidebar.refresh_thumbnails()
+        elif entry.kind == "stamp_batch":
+            for p_idx, stp in entry.payload:
+                lst = tab.engine.stamps.setdefault(p_idx, [])
+                if stp not in lst:
+                    lst.append(stp)
+                if 0 <= p_idx < len(tab.page_widgets):
+                    tab.page_widgets[p_idx].update()
         elif entry.action == "modify":
             store = self._store_for_kind(tab.engine, entry.kind)
             lst = store.setdefault(entry.page_idx, [])
             if entry.prop_name == "z_order":
                 if entry.payload in lst:
                     lst.remove(entry.payload)
-                    lst.append(entry.payload)
+                    target_idx = entry.new_value if isinstance(entry.new_value, int) else len(lst)
+                    lst.insert(max(0, min(len(lst), target_idx)), entry.payload)
+            elif entry.prop_name == "overlay_state" and isinstance(entry.new_value, dict):
+                for k, v in entry.new_value.items():
+                    setattr(entry.payload, k, v)
             elif entry.prop_name:
                 setattr(entry.payload, entry.prop_name, entry.new_value)
             if 0 <= entry.page_idx < len(tab.page_widgets):
@@ -1615,16 +1637,47 @@ class MainWindow(QMainWindow):
         elif action == "open_watermark":
             dlg = WatermarkDialog(self)
             if dlg.exec():
-                cur_bytes = tab.engine.build_final_pdf_bytes()
-                new_bytes = apply_watermark(
-                    cur_bytes,
-                    text=dlg.txt.text(),
-                    angle=int(dlg.angle.currentText()),
-                    opacity=dlg.opacity.value() / 100.0,
-                    font_size=dlg.size.value(),
-                    color_hex=dlg.color_hex,
+                wm_text = dlg.txt.text().strip() or "CONFIDENTIAL"
+                wm_font = dlg.font_combo.currentText() or "Arial"
+                wm_size = float(dlg.size.value())
+                wm_rot = float(dlg.angle.value())
+                wm_opac = max(0.05, min(1.0, dlg.opacity.value() / 100.0))
+                wm_col = dlg.color_hex
+                all_pages = dlg.scope_combo.currentIndex() == 0
+                target_pages = (
+                    list(range(tab.engine.page_count)) if all_pages else [tab.current_page]
                 )
-                self._replace_tab_document(tab, new_bytes)
+                created: list[tuple[int, StampItem]] = []
+                for pno in target_pages:
+                    pw_pt, ph_pt = tab.engine.get_page_size(pno)
+                    rect = PDFPageWidget.compute_text_overlay_rect(
+                        wm_text, wm_font, wm_size, pw_pt / 2.0, ph_pt / 2.0, kind="watermark"
+                    )
+                    wm = StampItem(
+                        page_idx=pno,
+                        kind="watermark",
+                        rect=rect,
+                        text=wm_text,
+                        color_hex=wm_col,
+                        font_size=wm_size,
+                        opacity=wm_opac,
+                        rotation=wm_rot,
+                        font_family=wm_font,
+                    )
+                    tab.engine.stamps.setdefault(pno, []).append(wm)
+                    created.append((pno, wm))
+                    if 0 <= pno < len(tab.page_widgets):
+                        if pno == tab.current_page:
+                            tab.page_widgets[pno].selected_item = wm
+                        tab.page_widgets[pno].update()
+                if created:
+                    tab.undo_stack.append(_UndoEntry(kind="stamp_batch", page_idx=tab.current_page, payload=created))
+                    tab.redo_stack.clear()
+                    self._set_tab_dirty(tab, True)
+                    self.sidebar.refresh_annotations()
+                    self.status_bar.showMessage(
+                        f"Added editable watermark to {len(created)} page(s) — drag, double-click, or right-click to edit"
+                    )
 
         elif action == "open_bates":
             dlg = BatesDialog(self)
