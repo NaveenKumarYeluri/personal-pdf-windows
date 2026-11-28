@@ -786,14 +786,31 @@ def test_overlay_move_rotate_sticky_edit_undo_and_double_click_word(qtbot, monke
     moved_rect = stp.rect
     assert moved_rect[0] > 100.0
 
-    # Double-click stamp edits text rather than deleting it!
-    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **kw: ("FINAL", True))
+    # Double-click stamp opens StampPropertiesDialog to edit text, font, size, color, opacity, angle, position
+    from PySide6.QtWidgets import QDialog
+    from app.ui.dialogs import StampPropertiesDialog
+
+    def _mock_stamp_props(self_dlg):
+        self_dlg.txt.setText("FINAL")
+        self_dlg.font_combo.setCurrentText("Georgia")
+        self_dlg.size.setValue(24)
+        self_dlg.angle.setValue(-12)
+        self_dlg.opacity.setValue(90)
+        self_dlg.color_hex = "#1d4ed8"
+        return QDialog.Accepted
+
+    monkeypatch.setattr(StampPropertiesDialog, "exec", _mock_stamp_props)
     QTest.mouseDClick(pw0, Qt.LeftButton, Qt.NoModifier, p_moved)
     assert len(tab.engine.stamps[0]) == 1
     assert stp.text == "FINAL"
+    assert stp.font_family == "Georgia"
+    assert stp.font_size == 24.0
+    assert stp.rotation == -12.0
+    assert stp.color_hex == "#1d4ed8"
 
-    win.undo()  # undo text edit
+    win.undo()  # undo stamp properties edit
     assert stp.text == "DRAFT"
+    assert stp.rotation == -8.0
     win.undo()  # undo move
     assert stp.rect == (80.0, 120.0, 220.0, 170.0)
     win.redo()
@@ -1474,3 +1491,50 @@ def test_edit_watermark_is_movable_editable_and_undoable(qtbot, monkeypatch):
     win.redo()
     assert len(tab.engine.stamps.get(0, [])) == 1
     assert len(tab.engine.stamps.get(1, [])) == 1
+
+
+def test_draw_stamp_auto_selects_moves_resizes_and_scales_font(qtbot):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+    tab = win.load_sample_pdf()
+    pw0 = tab.page_widgets[0]
+
+    # Start in Draw mode (Pen active by default) and place a stamp
+    win.set_mode("annotate")
+    assert win.tool_state["tool"] == "pen"
+    stamp_cb = win.ribbon.context_bar.findChild(QComboBox)
+    stamp_cb.setCurrentText("APPROVED")
+
+    # Placing a stamp auto-selects it and switches to Select so dragging moves it instead of drawing ink!
+    assert len(tab.engine.stamps.get(0, [])) == 1
+    stp = tab.engine.stamps[0][0]
+    assert pw0.selected_item is stp
+    assert win.tool_state["tool"] == "select"
+    assert win.ribbon._mode_tool_buttons["select"].isChecked()
+    assert tab.engine.ink_strokes.get(0, []) == []
+
+    # Drag stamp center to new position
+    orig_rect = stp.rect
+    cx = int(((orig_rect[0] + orig_rect[2]) / 2.0) * pw0.zoom)
+    cy = int(((orig_rect[1] + orig_rect[3]) / 2.0) * pw0.zoom)
+    QTest.mousePress(pw0, Qt.LeftButton, Qt.NoModifier, QPoint(cx, cy))
+    QTest.mouseMove(pw0, QPoint(cx + 40, cy + 30))
+    QTest.mouseRelease(pw0, Qt.LeftButton, Qt.NoModifier, QPoint(cx + 40, cy + 30))
+    assert tab.engine.ink_strokes.get(0, []) == []
+    assert stp.rect[0] > orig_rect[0] + 10.0
+
+    # Drag bottom-right resize handle to grow stamp -> font_size scales proportionally and Undo reverts both
+    moved_rect = stp.rect
+    orig_fs = stp.font_size
+    br = QPoint(int(moved_rect[2] * pw0.zoom), int(moved_rect[3] * pw0.zoom))
+    br_grown = QPoint(int((moved_rect[2] + 60.0) * pw0.zoom), int((moved_rect[3] + 35.0) * pw0.zoom))
+    QTest.mousePress(pw0, Qt.LeftButton, Qt.NoModifier, br)
+    QTest.mouseMove(pw0, br_grown)
+    QTest.mouseRelease(pw0, Qt.LeftButton, Qt.NoModifier, br_grown)
+    assert stp.rect[3] > moved_rect[3] + 15.0
+    assert stp.font_size > orig_fs
+
+    win.undo()
+    assert stp.rect == moved_rect
+    assert stp.font_size == orig_fs

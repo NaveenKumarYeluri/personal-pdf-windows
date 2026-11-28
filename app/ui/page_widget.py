@@ -127,6 +127,8 @@ class PDFPageWidget(QWidget):
         self._drag_start_pt: tuple[float, float] = (0.0, 0.0)
         self._drag_orig_rect: tuple[float, float, float, float] = (0, 0, 0, 0)
         self._drag_orig_pos: tuple[float, float] = (0.0, 0.0)
+        self._drag_orig_font_size: float = 18.0
+        self._drag_orig_state: dict | None = None
         self._panning: bool = False
         self._pan_last_global: QPointF | None = None
         self._stamp_pixmap_cache: dict[tuple[str, int], QPixmap] = {}
@@ -578,6 +580,11 @@ class PDFPageWidget(QWidget):
                     self._drag_mode = mode
                     self._drag_start_pt = (px, py)
                     self._drag_orig_rect = hit.rect
+                    if isinstance(hit, StampItem):
+                        self._drag_orig_font_size = float(hit.font_size)
+                        self._drag_orig_state = self._stamp_state_snapshot(hit)
+                    else:
+                        self._drag_orig_state = None
                 self.update()
                 return
 
@@ -699,6 +706,12 @@ class PDFPageWidget(QWidget):
                 nx1 = max(ox0 + 20.0, min(self._page_w_pt, ox1 + dx))
                 ny1 = max(oy0 + 16.0, min(self._page_h_pt, oy1 + dy))
                 self.selected_item.rect = (ox0, oy0, nx1, ny1)
+                if isinstance(self.selected_item, StampItem) and self.selected_item.kind in ("stamp", "watermark"):
+                    orig_h = max(12.0, oy1 - oy0)
+                    new_h = max(16.0, ny1 - oy0)
+                    self.selected_item.font_size = max(
+                        8.0, min(160.0, round(self._drag_orig_font_size * (new_h / orig_h), 1))
+                    )
             self.update()
             return
 
@@ -724,6 +737,16 @@ class PDFPageWidget(QWidget):
             self._erase_at(px, py)
             return
 
+        if self.active_tool in ("select", "edit_text", "move", "stamp", "whiteout", "redact") and (self.rotation % 360) == 0:
+            hit, mode = self._hit_overlay_item(px, py)
+            if hit is not None and not getattr(hit, "locked", False):
+                if self._hover_block is not None:
+                    self._hover_block = None
+                    self.update()
+                self.setCursor(Qt.SizeFDiagCursor if mode == "resize" else Qt.SizeAllCursor)
+                QToolTip.hideText()
+                return
+
         if self.active_tool == "edit_text" and (self.rotation % 360) == 0:
             blk = self.engine.find_block_at(self.page_idx, px, py)
             if blk is not self._hover_block:
@@ -733,6 +756,11 @@ class PDFPageWidget(QWidget):
             return
 
         if self.active_tool == "select":
+            note = self._find_sticky_note_at(px, py)
+            if note is not None:
+                self.setCursor(Qt.SizeAllCursor)
+                QToolTip.showText(event.globalPosition().toPoint(), f"{note.author}:\n{note.text}", self)
+                return
             fw = self.engine.find_form_widget_at(self.page_idx, px, py)
             if fw != self._hover_widget:
                 self._hover_widget = fw
@@ -776,9 +804,20 @@ class PDFPageWidget(QWidget):
             drag_mode = self._drag_mode
             orig_rect = self._drag_orig_rect
             orig_pos = self._drag_orig_pos
+            orig_state = self._drag_orig_state
             self._drag_mode = ""
+            self._drag_orig_state = None
             if drag_mode == "move_note" and isinstance(item, StickyNote) and item.pos != orig_pos:
                 self.annotationModified.emit(self.page_idx, "note", item, "pos", orig_pos, item.pos)
+            elif (
+                drag_mode == "resize"
+                and isinstance(item, StampItem)
+                and item.kind in ("stamp", "watermark")
+                and orig_state is not None
+            ):
+                new_state = self._stamp_state_snapshot(item)
+                if new_state != orig_state:
+                    self.annotationModified.emit(self.page_idx, "stamp", item, "overlay_state", orig_state, new_state)
             elif item is not None and hasattr(item, "rect") and item.rect != orig_rect:
                 kind, _ = self._store_for_overlay_item(item)
                 if kind is not None:
@@ -988,6 +1027,83 @@ class PDFPageWidget(QWidget):
             self.annotationModified.emit(self.page_idx, "stamp", item, "overlay_state", old_state, new_state)
             self.update()
 
+    def _edit_stamp_properties(self, item: StampItem) -> None:
+        from app.ui.dialogs import StampPropertiesDialog
+
+        x0, y0, x1, y1 = item.rect
+        cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+        orig_w, orig_h = x1 - x0, y1 - y0
+        dlg = StampPropertiesDialog(
+            self,
+            text=item.text,
+            font_family=getattr(item, "font_family", "Arial"),
+            font_size=int(round(item.font_size)),
+            angle=int(round(item.rotation)),
+            opacity_pct=int(round(item.opacity * 100.0)),
+            color_hex=item.color_hex or "#dc2626",
+            pos_x=cx,
+            pos_y=cy,
+            width_pt=orig_w,
+            height_pt=orig_h,
+        )
+        if not dlg.exec():
+            return
+        new_text = (dlg.txt.text().strip() or item.text).upper()
+        new_font = dlg.font_combo.currentText() or "Arial"
+        new_size = float(dlg.size.value())
+        new_rot = float(dlg.angle.value())
+        new_opac = max(0.05, min(1.0, dlg.opacity.value() / 100.0))
+        new_col = dlg.color_hex
+        new_cx = float(dlg.pos_x.value())
+        new_cy = float(dlg.pos_y.value())
+        old_state = self._stamp_state_snapshot(item)
+        new_w, new_h = float(dlg.box_w.value()), float(dlg.box_h.value())
+        if (dlg.box_w.value(), dlg.box_h.value()) == dlg._orig_size and (
+            new_text != item.text or new_font != getattr(item, "font_family", "Arial") or new_size != item.font_size
+        ):
+            new_rect = self.compute_text_overlay_rect(new_text, new_font, new_size, new_cx, new_cy, kind="stamp")
+        else:
+            new_rect = (new_cx - new_w / 2.0, new_cy - new_h / 2.0, new_cx + new_w / 2.0, new_cy + new_h / 2.0)
+
+        item.text = new_text
+        item.font_family = new_font
+        item.font_size = new_size
+        item.rotation = new_rot
+        item.opacity = new_opac
+        item.color_hex = new_col
+        item.rect = new_rect
+        new_state = self._stamp_state_snapshot(item)
+        if new_state != old_state:
+            self.annotationModified.emit(self.page_idx, "stamp", item, "overlay_state", old_state, new_state)
+            self.update()
+
+    def _edit_image_properties(self, item: StampItem) -> None:
+        from app.ui.dialogs import OverlayTransformDialog
+
+        x0, y0, x1, y1 = item.rect
+        cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+        dlg = OverlayTransformDialog(
+            self,
+            angle=int(round(item.rotation)),
+            opacity_pct=int(round(item.opacity * 100.0)),
+            pos_x=cx,
+            pos_y=cy,
+            width_pt=x1 - x0,
+            height_pt=y1 - y0,
+        )
+        if not dlg.exec():
+            return
+        old_state = self._stamp_state_snapshot(item)
+        new_cx, new_cy = float(dlg.pos_x.value()), float(dlg.pos_y.value())
+        new_w, new_h = float(dlg.box_w.value()), float(dlg.box_h.value())
+        item.rotation = float(dlg.angle.value())
+        item.opacity = max(0.05, min(1.0, dlg.opacity.value() / 100.0))
+        item.rect = (new_cx - new_w / 2.0, new_cy - new_h / 2.0, new_cx + new_w / 2.0, new_cy + new_h / 2.0)
+        new_state = self._stamp_state_snapshot(item)
+        if new_state != old_state:
+            self.annotationModified.emit(self.page_idx, "stamp", item, "overlay_state", old_state, new_state)
+            self.update()
+
     def build_context_menu(self, pos: QPointF) -> QMenu:
         px, py = self._to_pdf_pt(pos)
         menu = QMenu(self)
@@ -1033,6 +1149,12 @@ class PDFPageWidget(QWidget):
                     act_wm_col = menu.addAction("Watermark Color...", _wm_color)
                     act_wm_col.setEnabled(not getattr(hit, "locked", False))
                 elif hit.kind == "stamp":
+                    act_stp_props = menu.addAction(
+                        "Edit Stamp Properties...",
+                        lambda _chk=False, item=hit: self._edit_stamp_properties(item),
+                    )
+                    act_stp_props.setEnabled(not getattr(hit, "locked", False))
+
                     def _edit_stamp(_chk: bool = False, item: StampItem = hit) -> None:
                         txt, ok = QInputDialog.getText(self, "Edit Stamp", "Stamp text:", text=item.text)
                         if ok and txt.strip() and txt.strip().upper() != item.text:
@@ -1040,7 +1162,8 @@ class PDFPageWidget(QWidget):
                             item.text = txt.strip().upper()
                             self.annotationModified.emit(self.page_idx, "stamp", item, "text", old_txt, item.text)
                             self.update()
-                    menu.addAction("Edit Stamp Text...", _edit_stamp)
+                    act_stp_txt = menu.addAction("Edit Stamp Text...", _edit_stamp)
+                    act_stp_txt.setEnabled(not getattr(hit, "locked", False))
 
                     def _stamp_color(_chk: bool = False, item: StampItem = hit) -> None:
                         col = QColorDialog.getColor(QColor(item.color_hex or "#dc2626"), self, "Stamp Color")
@@ -1051,7 +1174,14 @@ class PDFPageWidget(QWidget):
                                 self.page_idx, "stamp", item, "color_hex", old_col, item.color_hex
                             )
                             self.update()
-                    menu.addAction("Stamp Color...", _stamp_color)
+                    act_stp_col = menu.addAction("Stamp Color...", _stamp_color)
+                    act_stp_col.setEnabled(not getattr(hit, "locked", False))
+                elif hit.kind == "image":
+                    act_img_props = menu.addAction(
+                        "Image / Signature Properties...",
+                        lambda _chk=False, item=hit: self._edit_image_properties(item),
+                    )
+                    act_img_props.setEnabled(not getattr(hit, "locked", False))
 
             def _bring_to_front(_chk: bool = False, item: object = hit, k: str | None = kind) -> None:
                 _, lst = self._store_for_overlay_item(item)
@@ -1066,7 +1196,21 @@ class PDFPageWidget(QWidget):
                             )
                         self.update()
 
+            def _send_to_back(_chk: bool = False, item: object = hit, k: str | None = kind) -> None:
+                _, lst = self._store_for_overlay_item(item)
+                if lst is not None and item in lst:
+                    old_idx = lst.index(item)
+                    if old_idx != 0:
+                        lst.remove(item)
+                        lst.insert(0, item)
+                        if k is not None:
+                            self.annotationModified.emit(
+                                self.page_idx, k, item, "z_order", old_idx, 0
+                            )
+                        self.update()
+
             menu.addAction("Bring to Front", _bring_to_front)
+            menu.addAction("Send to Back", _send_to_back)
             act_del = menu.addAction(
                 "Delete Overlay",
                 lambda _chk=False, item=hit: self._remove_overlay_item(item),
@@ -1171,12 +1315,10 @@ class PDFPageWidget(QWidget):
                 self._edit_watermark_properties(hit)
                 return
             if hit.kind == "stamp":
-                txt, ok = QInputDialog.getText(self, "Edit Stamp", "Stamp text:", text=hit.text)
-                if ok and txt.strip() and txt.strip().upper() != hit.text:
-                    old_txt = hit.text
-                    hit.text = txt.strip().upper()
-                    self.annotationModified.emit(self.page_idx, "stamp", hit, "text", old_txt, hit.text)
-                    self.update()
+                self._edit_stamp_properties(hit)
+                return
+            if hit.kind == "image":
+                self._edit_image_properties(hit)
                 return
         if self.active_tool == "select" and hit is None:
             if self._select_word_at(px, py):

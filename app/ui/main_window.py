@@ -1533,16 +1533,26 @@ class MainWindow(QMainWindow):
                 label = txt.strip().upper()
             pw_pt, ph_pt = tab.engine.get_page_size(tab.current_page)
             cx, cy = pw_pt / 2.0, ph_pt / 2.0
+            rect = PDFPageWidget.compute_text_overlay_rect(label, "Arial", 18.0, cx, cy, kind="stamp")
             stp = StampItem(
                 page_idx=tab.current_page,
                 kind="stamp",
-                rect=(cx - 90, cy - 26, cx + 90, cy + 26),
+                rect=rect,
                 text=label,
                 color_hex="#dc2626",
+                font_size=18.0,
+                font_family="Arial",
             )
             tab.engine.stamps.setdefault(tab.current_page, []).append(stp)
             self._on_annot_added(tab, tab.current_page, "stamp", stp)
-            tab.page_widgets[tab.current_page].update()
+            pw = tab.page_widgets[tab.current_page]
+            pw.selected_item = stp
+            if self.tool_state["tool"] not in ("select", "edit_text", "move"):
+                self._set_active_tool("select")
+            pw.update()
+            self.status_bar.showMessage(
+                f"Placed '{label}' stamp — drag to move, drag corner to resize, or double-click for properties"
+            )
 
         elif action == "insert_image":
             path, _ = QFileDialog.getOpenFileName(self, "Insert Image", "", "Images (*.png *.jpg *.jpeg *.bmp *.webp)")
@@ -1805,7 +1815,11 @@ class MainWindow(QMainWindow):
         )
         tab.engine.stamps.setdefault(tab.current_page, []).append(stp)
         self._on_annot_added(tab, tab.current_page, "stamp", stp)
-        tab.page_widgets[tab.current_page].update()
+        pw = tab.page_widgets[tab.current_page]
+        pw.selected_item = stp
+        if self.tool_state["tool"] not in ("select", "edit_text", "move"):
+            self._set_active_tool("select")
+        pw.update()
         return True
 
     def _refresh_tab_search_after_doc_change(self, tab: DocumentTab) -> None:

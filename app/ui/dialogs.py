@@ -584,6 +584,172 @@ class WatermarkDialog(QDialog):
             _style_color_swatch_btn(self.btn_col, self.color_hex)
 
 
+class StampPropertiesDialog(QDialog):
+    """Edit stamp text, font, size, color, opacity, rotation, position, and dimensions."""
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        text: str = "APPROVED",
+        font_family: str = "Arial",
+        font_size: int = 18,
+        angle: int = -8,
+        opacity_pct: int = 85,
+        color_hex: str = "#dc2626",
+        pos_x: float = 0.0,
+        pos_y: float = 0.0,
+        width_pt: float = 180.0,
+        height_pt: float = 52.0,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Stamp Properties")
+        self.color_hex = color_hex
+        self._orig_size = (int(round(width_pt)), int(round(height_pt)))
+        form = QFormLayout(self)
+
+        self.txt = QLineEdit(text)
+        self.font_combo = QComboBox()
+        self.font_combo.addItems(available_ui_fonts())
+        f_idx = self.font_combo.findText(font_family, Qt.MatchFixedString)
+        if f_idx >= 0:
+            self.font_combo.setCurrentIndex(f_idx)
+
+        self.size = QSpinBox()
+        self.size.setRange(8, 140)
+        self.size.setValue(int(round(font_size)))
+        self.size.setSuffix(" pt")
+
+        self.angle = QSpinBox()
+        self.angle.setRange(-180, 180)
+        self.angle.setValue(int(round(angle)))
+        self.angle.setSuffix("°")
+
+        self.opacity = QSpinBox()
+        self.opacity.setRange(5, 100)
+        self.opacity.setValue(int(round(opacity_pct)))
+        self.opacity.setSuffix("%")
+
+        self.btn_col = QPushButton()
+        _style_color_swatch_btn(self.btn_col, self.color_hex)
+        self.btn_col.clicked.connect(self._pick_col)
+
+        self.pos_x = QSpinBox()
+        self.pos_x.setRange(0, 5000)
+        self.pos_x.setValue(int(round(pos_x)))
+        self.pos_x.setSuffix(" pt")
+        self.pos_y = QSpinBox()
+        self.pos_y.setRange(0, 5000)
+        self.pos_y.setValue(int(round(pos_y)))
+        self.pos_y.setSuffix(" pt")
+        pos_row = QHBoxLayout()
+        pos_row.addWidget(QLabel("X:"))
+        pos_row.addWidget(self.pos_x)
+        pos_row.addWidget(QLabel("Y:"))
+        pos_row.addWidget(self.pos_y)
+
+        self.box_w = QSpinBox()
+        self.box_w.setRange(40, 2000)
+        self.box_w.setValue(self._orig_size[0])
+        self.box_w.setSuffix(" pt")
+        self.box_h = QSpinBox()
+        self.box_h.setRange(20, 2000)
+        self.box_h.setValue(self._orig_size[1])
+        self.box_h.setSuffix(" pt")
+        dim_row = QHBoxLayout()
+        dim_row.addWidget(QLabel("W:"))
+        dim_row.addWidget(self.box_w)
+        dim_row.addWidget(QLabel("H:"))
+        dim_row.addWidget(self.box_h)
+
+        form.addRow("Stamp Text:", self.txt)
+        form.addRow("Font:", self.font_combo)
+        form.addRow("Font Size:", self.size)
+        form.addRow("Rotation Angle:", self.angle)
+        form.addRow("Opacity:", self.opacity)
+        form.addRow("Color:", self.btn_col)
+        form.addRow("Center Position:", pos_row)
+        form.addRow("Box Size:", dim_row)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        form.addRow(btns)
+
+    def _pick_col(self) -> None:
+        c = QColorDialog.getColor(QColor(self.color_hex), self, "Stamp Color")
+        if c.isValid():
+            self.color_hex = c.name()
+            _style_color_swatch_btn(self.btn_col, self.color_hex)
+
+
+class OverlayTransformDialog(QDialog):
+    """Edit position, size, rotation, and opacity for image/signature overlays."""
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        angle: int = 0,
+        opacity_pct: int = 100,
+        pos_x: float = 0.0,
+        pos_y: float = 0.0,
+        width_pt: float = 120.0,
+        height_pt: float = 80.0,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Image / Signature Properties")
+        form = QFormLayout(self)
+
+        self.angle = QSpinBox()
+        self.angle.setRange(-180, 180)
+        self.angle.setValue(int(round(angle)))
+        self.angle.setSuffix("°")
+
+        self.opacity = QSpinBox()
+        self.opacity.setRange(5, 100)
+        self.opacity.setValue(int(round(opacity_pct)))
+        self.opacity.setSuffix("%")
+
+        self.pos_x = QSpinBox()
+        self.pos_x.setRange(0, 5000)
+        self.pos_x.setValue(int(round(pos_x)))
+        self.pos_x.setSuffix(" pt")
+        self.pos_y = QSpinBox()
+        self.pos_y.setRange(0, 5000)
+        self.pos_y.setValue(int(round(pos_y)))
+        self.pos_y.setSuffix(" pt")
+        pos_row = QHBoxLayout()
+        pos_row.addWidget(QLabel("X:"))
+        pos_row.addWidget(self.pos_x)
+        pos_row.addWidget(QLabel("Y:"))
+        pos_row.addWidget(self.pos_y)
+
+        self.box_w = QSpinBox()
+        self.box_w.setRange(20, 3000)
+        self.box_w.setValue(max(20, int(round(width_pt))))
+        self.box_w.setSuffix(" pt")
+        self.box_h = QSpinBox()
+        self.box_h.setRange(16, 3000)
+        self.box_h.setValue(max(16, int(round(height_pt))))
+        self.box_h.setSuffix(" pt")
+        dim_row = QHBoxLayout()
+        dim_row.addWidget(QLabel("W:"))
+        dim_row.addWidget(self.box_w)
+        dim_row.addWidget(QLabel("H:"))
+        dim_row.addWidget(self.box_h)
+
+        form.addRow("Rotation Angle:", self.angle)
+        form.addRow("Opacity:", self.opacity)
+        form.addRow("Center Position:", pos_row)
+        form.addRow("Size:", dim_row)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        form.addRow(btns)
+
+
 class BatesDialog(QDialog):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
