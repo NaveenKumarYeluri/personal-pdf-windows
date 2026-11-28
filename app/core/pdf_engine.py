@@ -680,26 +680,35 @@ class PDFDocumentEngine:
         else:
             lh_ratio = 1.22
 
-        # Build rich inline HTML preserving inline bold/italic/color runs
+        # Build rich inline HTML preserving inline bold/italic/color runs; merge adjacent matching spans first
         html_runs: list[str] = []
         for l_idx, ln in enumerate(lines):
-            line_html = []
+            merged_spans: list[tuple[bool, bool, str, list[str]]] = []
             for sp in ln.get("spans", []):
-                raw_txt = heal_pdf_text(sp.get("text", ""))
-                if not raw_txt:
+                sp_txt = sp.get("text", "")
+                if not sp_txt:
                     continue
-                fam, is_b, is_i = resolve_pdf_font_name(sp.get("font", ""))
+                _fam, is_b, is_i = resolve_pdf_font_name(sp.get("font", ""))
                 flags = int(sp.get("flags", 0))
                 is_b = is_b or bool(flags & 16)
                 is_i = is_i or bool(flags & 2)
-                c_hex = f"#{int(sp.get('color', 0)):06x}"
+                c_hex = f"#{int(sp.get('color', 0)):06x}".lower()
+                if merged_spans and merged_spans[-1][:3] == (is_b, is_i, c_hex):
+                    merged_spans[-1][3].append(sp_txt)
+                else:
+                    merged_spans.append((is_b, is_i, c_hex, [sp_txt]))
 
+            line_html = []
+            for is_b, is_i, c_hex, parts in merged_spans:
+                raw_txt = heal_pdf_text("".join(parts))
+                if not raw_txt:
+                    continue
                 frag = html_lib.escape(raw_txt)
                 if is_b != dom_bold:
                     frag = f"<b>{frag}</b>" if is_b else f'<span style="font-weight:normal;">{frag}</span>'
                 if is_i != dom_italic:
                     frag = f"<i>{frag}</i>" if is_i else f'<span style="font-style:normal;">{frag}</span>'
-                if c_hex.lower() != dom_color.lower():
+                if c_hex != dom_color.lower():
                     frag = f'<span style="color:{c_hex};">{frag}</span>'
                 line_html.append(frag)
             joined_line = "".join(line_html).strip()
@@ -936,6 +945,8 @@ class PDFDocumentEngine:
             # Build vertical shift map from edited blocks
             shift_events: list[tuple[float, float, float, float]] = []  # (orig_x0, orig_x1, orig_y1, delta_y)
             for op in matched_edits.values():
+                if not op.new_text.strip():
+                    continue
                 w = max(40.0, op.target_rect[2] - op.target_rect[0])
                 orig_h = max(12.0, op.orig_rect[3] - op.orig_rect[1])
                 new_h = measure_html_height(op.new_html, w)
@@ -1057,6 +1068,8 @@ class PDFDocumentEngine:
 
                     # Either edited or shifted -> redact original position
                     redact_text_rects.append(pymupdf.Rect(blk.rect))
+                    if op is not None and not op.new_text.strip():
+                        continue
                     tx0 = op.target_rect[0] if op else blk.rect[0]
                     tx1 = op.target_rect[2] if op else min(page_w - 36.0, blk.rect[2] + 12.0)
                     ty0 = (op.target_rect[1] if op else blk.rect[1]) + shift
@@ -1124,6 +1137,8 @@ class PDFDocumentEngine:
 
                 elif kind == "new_op":
                     op: TextEditOp = payload
+                    if not op.new_text.strip():
+                        continue
                     shift = _cumulative_shift(op.target_rect[0], op.target_rect[2], op.target_rect[1])
                     w = max(40.0, op.target_rect[2] - op.target_rect[0])
                     h = measure_html_height(op.new_html, w)

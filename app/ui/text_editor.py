@@ -155,6 +155,13 @@ class InPlaceTextEditor(QTextEdit):
                 return
         super().keyPressEvent(event)
 
+    def _selection_covers_all(self) -> bool:
+        cur = self.textCursor()
+        if not cur.hasSelection():
+            return True
+        doc_len = max(0, self.document().characterCount() - 1)
+        return cur.selectionStart() == 0 and cur.selectionEnd() >= doc_len
+
     def _target_cursor(self) -> QTextCursor:
         cur = self.textCursor()
         if not cur.hasSelection():
@@ -162,19 +169,23 @@ class InPlaceTextEditor(QTextEdit):
         return cur
 
     def set_font_family(self, family: str) -> None:
+        covers_all = self._selection_covers_all()
         cur = self._target_cursor()
         fmt = QTextCharFormat()
         fmt.setFontFamilies([family])
         cur.mergeCharFormat(fmt)
-        self.pdf_block.font_family = family
+        if covers_all:
+            self.pdf_block.font_family = family
         self.formatStateChanged.emit()
 
     def set_font_size_pt(self, size_pt: int) -> None:
+        covers_all = self._selection_covers_all()
         cur = self._target_cursor()
         fmt = QTextCharFormat()
         fmt.setFontPointSize(max(2.0, float(size_pt) * self.zoom))
         cur.mergeCharFormat(fmt)
-        self.pdf_block.font_size = float(size_pt)
+        if covers_all:
+            self.pdf_block.font_size = float(size_pt)
         self._on_contents_changed()
         self.formatStateChanged.emit()
 
@@ -215,11 +226,13 @@ class InPlaceTextEditor(QTextEdit):
         self.formatStateChanged.emit()
 
     def set_text_color(self, color_hex: str) -> None:
+        covers_all = self._selection_covers_all()
         cur = self._target_cursor()
         fmt = QTextCharFormat()
         fmt.setForeground(QColor(color_hex))
         cur.mergeCharFormat(fmt)
-        self.pdf_block.color_hex = color_hex
+        if covers_all:
+            self.pdf_block.color_hex = color_hex
         self.formatStateChanged.emit()
 
     def set_alignment(self, align: str) -> None:

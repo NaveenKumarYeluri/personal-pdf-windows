@@ -38,6 +38,15 @@ def test_ligature_healing():
     assert heal_pdf_text("single par\u019f\u019fon in ﬁlegroup") == "single partition in filegroup"
     assert heal_pdf_text("mul\u019fple speci\ufb01c di\ufb00erent") == "multiple specific different"
     assert heal_pdf_text("a\ufffder o\ufffden") == "after often"
+    assert heal_pdf_text("a\u014cer swi\u014c spli\u01abng") == "after swift splitting"
+    assert heal_pdf_text("Alloca\u019fon Op\u019fmizer Analy\u019fcal") == "Allocation Optimizer Analytical"
+
+    eng = PDFDocumentEngine(SQL_PDF.read_bytes(), "SQL.pdf")
+    for pno in range(eng.page_count):
+        for blk in eng.extract_text_blocks(pno):
+            for bad in ("\u019f", "\u014c", "\u014d", "\u01ab"):
+                assert bad not in blk.plain_text
+                assert bad not in blk.html
 
 
 def test_signature_extraction_and_typed_signature():

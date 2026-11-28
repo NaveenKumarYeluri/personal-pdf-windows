@@ -1018,3 +1018,40 @@ def test_sidebar_active_indicators_and_lazy_expand_collapse(qtbot, monkeypatch):
     assert not btn_pages.isChecked() and not btn_outline.isChecked() and not btn_notes.isChecked()
     assert len(rendered_pages) <= 2
     assert 12 not in rendered_pages
+
+
+def test_partial_editor_formatting_preserves_block_defaults(qtbot):
+    from PySide6.QtGui import QTextCursor
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+
+    tab = win.open_pdf_path(str(SQL_PDF))
+    assert tab is not None
+    win.ribbon.set_mode("edit")
+    pw0 = tab.page_widgets[0]
+    blk = next(b for b in tab.engine.extract_text_blocks(0) if "Physically, SQL Server tables" in b.plain_text)
+    ed = pw0.open_editor_for_block(blk)
+    orig_size = blk.font_size
+    cur = ed.textCursor()
+    cur.setPosition(0)
+    cur.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, 10)
+    ed.setTextCursor(cur)
+    ed.set_font_size_pt(22)
+    ed.set_text_color("#dc2626")
+    assert blk.font_size == orig_size
+    assert blk.color_hex == "#000000"
+    pw0.commit_active_editor()
+
+    saved_doc = pymupdf.open(stream=tab.engine.build_final_pdf_bytes(), filetype="pdf")
+    spans = [
+        sp
+        for b in saved_doc[0].get_text("dict")["blocks"]
+        if b["type"] == 0
+        for ln in b["lines"]
+        for sp in ln["spans"]
+    ]
+    assert any("Physically" in s["text"] and s["size"] > 18.0 for s in spans)
+    assert any("SQL Server tables" in s["text"] and s["size"] < 15.0 for s in spans)
+    saved_doc.close()

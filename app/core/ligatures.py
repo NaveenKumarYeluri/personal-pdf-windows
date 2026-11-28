@@ -5,19 +5,26 @@ from __future__ import annotations
 import re
 import unicodedata
 
-# Characters produced by broken PDF ToUnicode CMaps for ligatures (ti, tt, fi, fl, ft, etc.)
-_BAD = r"[\ufffd\u0000\u001f\u007f\u019f\?]"
+# Generic replacement/corrupt characters produced by broken PDF ToUnicode CMaps
+_BAD = r"[\ufffd\u0000\u001f\u007f\?]"
+
+# Deterministic 1-to-2 ligature codepoints emitted by Calibri/Windows PDF CMaps
+_DIRECT_LIGATURES: tuple[tuple[str, str], ...] = (
+    ("\uFB00", "ff"),
+    ("\uFB01", "fi"),
+    ("\uFB02", "fl"),
+    ("\uFB03", "ffi"),
+    ("\uFB04", "ffl"),
+    ("\uFB05", "ft"),
+    ("\uFB06", "st"),
+    ("\u019f", "ti"),
+    ("\u014c", "ft"),
+    ("\u014d", "ft"),
+    ("\u01ab", "tti"),
+)
 
 _REPLACEMENTS: list[tuple[re.Pattern[str], str]] = [
-    # Standard alphabetic presentation forms
-    (re.compile("\uFB00"), "ff"),
-    (re.compile("\uFB01"), "fi"),
-    (re.compile("\uFB02"), "fl"),
-    (re.compile("\uFB03"), "ffi"),
-    (re.compile("\uFB04"), "ffl"),
-    (re.compile("\uFB05"), "ft"),
-    (re.compile("\uFB06"), "st"),
-    # Specific high-frequency database/technical terms (handles single or double artifact chars like parƟƟon)
+    # Specific high-frequency database/technical terms when CMap uses generic replacement chars
     (re.compile(rf"\bImplementa\s*{_BAD}{{1,2}}on\b"), "Implementation"),
     (re.compile(rf"\bimplemen\s*ta\s*{_BAD}{{1,2}}on\b"), "implementation"),
     (re.compile(rf"\bPar{_BAD}{{1,2}}on\b"), "Partition"),
@@ -44,8 +51,10 @@ _REPLACEMENTS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(rf"\biden{_BAD}{{1,2}}fiers\b", re.I), "identifiers"),
     (re.compile(rf"\biden{_BAD}{{1,2}}fy\b", re.I), "identify"),
     (re.compile(rf"([a-zA-Z]){_BAD}{{1,2}}(fi|fl)"), r"\1ti\2"),
-    (re.compile(rf"\balloca{_BAD}{{1,2}}on\b", re.I), "allocation"),
-    (re.compile(rf"\balloca{_BAD}{{1,2}}ons\b", re.I), "allocations"),
+    (re.compile(rf"\bAlloca{_BAD}{{1,2}}on\b"), "Allocation"),
+    (re.compile(rf"\balloca{_BAD}{{1,2}}on\b"), "allocation"),
+    (re.compile(rf"\bAlloca{_BAD}{{1,2}}ons\b"), "Allocations"),
+    (re.compile(rf"\balloca{_BAD}{{1,2}}ons\b"), "allocations"),
     # ft words
     (re.compile(rf"([a-zA-Z]*a){_BAD}{{1,2}}(er(?:ward|wards)?\b)", re.I), r"\1ft\2"),
     (re.compile(rf"([a-zA-Z]*o){_BAD}{{1,2}}(en\b)", re.I), r"\1ft\2"),
@@ -73,6 +82,7 @@ _REPLACEMENTS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 _PUA_STRIP_RE = re.compile(r"[\ufffd\u0000\u001f\u007f\uE000-\uF8FF]")
+_TRIGGER_RE = re.compile(r"[\ufffd\x00\x1f\x7f\?\u014c\u014d\u019f\u01ab\uFB00-\uFB06\uE000-\uF8FF]")
 
 
 def heal_pdf_text(text: str) -> str:
@@ -80,21 +90,21 @@ def heal_pdf_text(text: str) -> str:
     if not text:
         return text
 
-    # Quick exit when no suspicious markers exist
-    if not any(ch in text for ch in ("\ufffd", "\x00", "\x1f", "\u019f", "?")) and not re.search(
-        r"[\uFB00-\uFB06\uE000-\uF8FF]", text
-    ):
+    if not _TRIGGER_RE.search(text):
         return text
 
     cleaned = text
-    # Handle cases like "Implementa Ɵon" -> "Implementation" before general rules
-    cleaned = re.sub(r"\b([A-Za-z]+)a\s+\u019f{1,2}on\b", r"\1ation", cleaned)
-    cleaned = re.sub(r"\b([A-Za-z]+)e\s+\u019f{1,2}on\b", r"\1etion", cleaned)
+    # Handle cases like "Implementa Ɵon" -> "Implementation" before deterministic replacement
+    cleaned = re.sub(r"\b([A-Za-z]+[ae])\s+\u019f{1,2}on\b", r"\1tion", cleaned)
+    # Handle doubled \u019f\u019f inside words like parƟƟon -> par + ti + ti + on (only valid)
+    for bad_ch, repl in _DIRECT_LIGATURES:
+        if bad_ch in cleaned:
+            cleaned = cleaned.replace(bad_ch, repl)
 
-    for pattern, repl in _REPLACEMENTS:
-        cleaned = pattern.sub(repl, cleaned)
+    if any(ch in cleaned for ch in ("\ufffd", "\x00", "\x1f", "\x7f", "?")):
+        for pattern, repl in _REPLACEMENTS:
+            cleaned = pattern.sub(repl, cleaned)
 
-    # Second pass for \uFB01/\uFB02 that may have been exposed after prefix repair
-    cleaned = cleaned.replace("\uFB01", "fi").replace("\uFB02", "fl").replace("\uFB00", "ff").replace("\xa0", " ")
+    cleaned = cleaned.replace("\xa0", " ")
     cleaned = _PUA_STRIP_RE.sub("", cleaned)
     return unicodedata.normalize("NFC", cleaned)

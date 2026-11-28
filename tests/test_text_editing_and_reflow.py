@@ -270,3 +270,32 @@ def test_add_text_and_reediting_new_block_preserves_and_overflows():
     assert "Overflow added line 1" in doc2[0].get_text("text")
     assert "Overflow added line 7" in doc2[1].get_text("text")
     doc2.close()
+
+
+def test_clear_block_to_empty_leaves_no_phantom_block():
+    raw = SQL_PDF.read_bytes()
+    eng = PDFDocumentEngine(raw, "SQL.pdf")
+    blocks_p1 = eng.extract_text_blocks(0)
+    target = next(b for b in blocks_p1 if "Physical Implementation" in b.plain_text)
+    y_next_before = next(b for b in blocks_p1 if "Physically, SQL Server tables" in b.plain_text).rect[1]
+
+    eng.set_in_place_edit(
+        TextEditOp(
+            edit_id="clear1",
+            page_idx=0,
+            orig_rect=target.rect,
+            target_rect=target.rect,
+            original_text=target.plain_text,
+            original_html=target.html,
+            new_text="",
+            new_html='<div style="font-family:Calibri,sans-serif;font-size:14pt;"><p>&nbsp;</p></div>',
+            font_family="Calibri",
+            font_size=14.0,
+            color_hex="#000000",
+            block_id=target.block_id,
+        )
+    )
+    after_blocks = eng.extract_text_blocks(0)
+    assert not any(b.base_block_id == target.block_id for b in after_blocks)
+    y_next_after = next(b for b in after_blocks if "Physically, SQL Server tables" in b.plain_text).rect[1]
+    assert abs(y_next_after - y_next_before) < 1.0
