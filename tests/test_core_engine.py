@@ -244,3 +244,29 @@ def test_form_widgets_engine_and_links():
     eng.remove_form_value(0, 0)
     eng.remove_form_value(0, 1)
     assert eng.get_page_render_revision(0) == 0
+
+
+def test_split_every_n_and_typed_signature_styles():
+    from app.core.document_ops import split_pdf_every_n
+
+    pdf_bytes = SQL_PDF.read_bytes()
+    with pytest.raises(ValueError):
+        split_pdf_every_n(pdf_bytes, 0)
+
+    chunks = split_pdf_every_n(pdf_bytes, 5, base_name="SQL.pdf")
+    assert [name for name, _ in chunks] == [
+        "SQL_pages_1-5.pdf",
+        "SQL_pages_6-10.pdf",
+        "SQL_pages_11-13.pdf",
+    ]
+    counts = []
+    for _name, raw in chunks:
+        d = pymupdf.open(stream=raw, filetype="pdf")
+        counts.append(len(d))
+        d.close()
+    assert counts == [5, 5, 3]
+
+    for style in ("script", "serif", "classic"):
+        png = render_typed_signature_png("Jane Doe", "#b91c1c", font_style=style)
+        im = Image.open(io.BytesIO(png)).convert("RGBA")
+        assert im.width > 30 and im.height > 15

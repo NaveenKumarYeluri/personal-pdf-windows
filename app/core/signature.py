@@ -80,21 +80,40 @@ def extract_signature_ink_bytes(
     return buf.getvalue()
 
 
-def render_typed_signature_png(name: str, color_hex: str = "#000000") -> bytes:
+def render_typed_signature_png(
+    name: str,
+    color_hex: str = "#000000",
+    font_style: str = "script",
+) -> bytes:
     """Render a cursive/italic typed signature onto a transparent PNG."""
     text = (name or "Signature").strip() or "Signature"
     w, h = 480, 140
     im = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(im)
 
+    style_map = {
+        "script": (
+            r"C:\Windows\Fonts\segoesc.ttf",
+            r"C:\Windows\Fonts\SCRIPTBL.TTF",
+            r"C:\Windows\Fonts\BRUSHSCI.TTF",
+            r"C:\Windows\Fonts\georgiai.ttf",
+            r"C:\Windows\Fonts\timesi.ttf",
+        ),
+        "serif": (
+            r"C:\Windows\Fonts\georgiai.ttf",
+            r"C:\Windows\Fonts\timesi.ttf",
+            r"C:\Windows\Fonts\segoesc.ttf",
+        ),
+        "classic": (
+            r"C:\Windows\Fonts\timesi.ttf",
+            r"C:\Windows\Fonts\georgiai.ttf",
+            r"C:\Windows\Fonts\segoesc.ttf",
+        ),
+    }
+    candidates = style_map.get(font_style, style_map["script"])
+
     font = None
-    for candidate in (
-        r"C:\Windows\Fonts\segoesc.ttf",
-        r"C:\Windows\Fonts\SCRIPTBL.TTF",
-        r"C:\Windows\Fonts\BRUSHSCI.TTF",
-        r"C:\Windows\Fonts\georgiai.ttf",
-        r"C:\Windows\Fonts\timesi.ttf",
-    ):
+    for candidate in candidates:
         try:
             font = ImageFont.truetype(candidate, 54)
             break

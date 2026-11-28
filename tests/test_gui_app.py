@@ -1154,3 +1154,66 @@ def test_document_snapshot_undo_redo_and_sidebar_actions(qtbot):
     tab.engine.custom_bookmarks[0] = ("New Name", 0)
     win.sidebar.bookmarkRenamed.emit("Old Name", "New Name", 0)
     assert tab.dirty is True
+
+
+def test_split_every_n_signature_reuse_print_label_jpeg_and_ui_sync(qtbot, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+    from app.core.pdf_engine import create_sample_pdf_bytes
+    from app.ui.dialogs import PdfPrintDialog, SignatureDialog, SplitDialog
+
+    # 1. Print dialog live page count label updates cleanly
+    dlg_print = PdfPrintDialog(create_sample_pdf_bytes())
+    qtbot.addWidget(dlg_print)
+    dlg_print.show()
+    qtbot.wait(30)
+    assert dlg_print.lbl_prev_page.text() == "Page 1 / 2"
+    dlg_print.close_doc()
+    dlg_print.close()
+
+    # 2. SplitDialog every-N mode
+    dlg_split = SplitDialog(10)
+    qtbot.addWidget(dlg_split)
+    dlg_split.rb_every_n.setChecked(True)
+    dlg_split.every_n_spin.setValue(4)
+    dlg_split._validate_and_accept()
+    assert dlg_split.result() == SplitDialog.Accepted
+    assert dlg_split.is_every_n_mode() and dlg_split.every_n_value() == 4
+
+    # 3. SignatureDialog session reuse + undo_stroke
+    SignatureDialog._SAVED_SIGNATURES.clear()
+    sig1 = SignatureDialog()
+    qtbot.addWidget(sig1)
+    sig1.pad._strokes.append([QPoint(10, 10), QPoint(50, 30)])
+    assert len(sig1.pad._strokes) == 1
+    sig1.pad.undo_stroke()
+    assert len(sig1.pad._strokes) == 0
+    sig1.tabs.setCurrentIndex(1)
+    sig1.type_input.setText("Alice Reviewer")
+    sig1._on_accept()
+    assert sig1.result() == SignatureDialog.Accepted and sig1.result_png_bytes
+
+    sig2 = SignatureDialog()
+    qtbot.addWidget(sig2)
+    assert sig2.saved_list.count() == 1
+    sig2.tabs.setCurrentIndex(3)
+    sig2._on_accept()
+    assert sig2.result_png_bytes == sig1.result_png_bytes
+
+    # 4. Duplicate tab guard, Pan contextual tool indicator sync, and JPEG page export
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+    tab1 = win.open_pdf_path(str(SQL_PDF))
+    tab2 = win.open_pdf_path(str(SQL_PDF))
+    assert tab2 is tab1 and win.tabs.count() == 1
+
+    win.set_mode("annotate")
+    assert win.ribbon._mode_tool_buttons["pen"].isChecked()
+    win.left_rail.btn_pan.click()
+    assert win.tool_state["tool"] == "pan"
+    assert not win.ribbon._mode_tool_buttons["pen"].isChecked()
+
+    jpg_out = tmp_path / "page1.jpg"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **kw: (str(jpg_out), "JPEG Image (*.jpg *.jpeg)"))
+    win._on_tool_action("export_png", {})
+    assert jpg_out.exists() and jpg_out.read_bytes().startswith(b"\xff\xd8")

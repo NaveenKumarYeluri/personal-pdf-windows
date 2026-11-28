@@ -85,6 +85,31 @@ def split_pdf_by_ranges(
     return outputs
 
 
+def split_pdf_every_n(
+    pdf_bytes: bytes, pages_per_file: int = 1, base_name: str = "document"
+) -> list[tuple[str, bytes]]:
+    """Split PDF into consecutive chunks of at most pages_per_file pages each."""
+    n = int(pages_per_file)
+    if n < 1:
+        raise ValueError("Pages per split file must be 1 or greater.")
+    src = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    total_pages = len(src)
+    if total_pages <= 0:
+        src.close()
+        raise ValueError("The PDF document contains no pages.")
+    outputs: list[tuple[str, bytes]] = []
+    clean_base = re.sub(r"\.pdf$", "", base_name or "document", flags=re.I)
+    for start0 in range(0, total_pages, n):
+        end0 = min(total_pages - 1, start0 + n - 1)
+        out_doc = pymupdf.open()
+        out_doc.insert_pdf(src, from_page=start0, to_page=end0)
+        label = f"page_{start0 + 1}" if start0 == end0 else f"pages_{start0 + 1}-{end0 + 1}"
+        outputs.append((f"{clean_base}_{label}.pdf", out_doc.tobytes(deflate=True, garbage=3)))
+        out_doc.close()
+    src.close()
+    return outputs
+
+
 def merge_pdfs(pdf_bytes_list: list[bytes]) -> bytes:
     """Concatenate multiple PDFs into one document."""
     if not pdf_bytes_list:

@@ -207,6 +207,11 @@ class _SignaturePad(QWidget):
         self._cur.clear()
         self.update()
 
+    def undo_stroke(self) -> None:
+        if self._strokes:
+            self._strokes.pop()
+            self.update()
+
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
             self._cur = [event.position().toPoint()]
@@ -262,14 +267,18 @@ class _SignaturePad(QWidget):
 
 
 class SignatureDialog(QDialog):
-    """Draw, type, or upload signature with adaptive paper background removal."""
+    """Draw, type, upload, or reuse electronic signatures with adaptive background removal."""
+
+    _SAVED_SIGNATURES: list[tuple[str, bytes]] = []
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setWindowTitle("Create Signature")
-        self.resize(540, 380)
+        self.resize(560, 410)
         self.result_png_bytes: bytes | None = None
         self._raw_upload_bytes: bytes | None = None
+        self._ink_color_hex: str = "#000000"
+        self._typed_style: str = "script"
 
         root = QVBoxLayout(self)
         self.tabs = QTabWidget()
@@ -281,15 +290,18 @@ class SignatureDialog(QDialog):
         self.pad = _SignaturePad()
         ld.addWidget(self.pad, alignment=Qt.AlignCenter)
         dh = QHBoxLayout()
+        btn_undo = QPushButton("Undo Stroke")
+        btn_undo.clicked.connect(self.pad.undo_stroke)
         btn_clear = QPushButton("Clear")
         btn_clear.clicked.connect(self.pad.clear)
         btn_black = QPushButton("Black Ink")
         btn_black.clicked.connect(lambda: self._set_ink("#000000"))
         btn_blue = QPushButton("Blue Ink")
         btn_blue.clicked.connect(lambda: self._set_ink("#0033aa"))
-        dh.addWidget(btn_clear)
-        dh.addWidget(btn_black)
-        dh.addWidget(btn_blue)
+        btn_red = QPushButton("Red Ink")
+        btn_red.clicked.connect(lambda: self._set_ink("#b91c1c"))
+        for b in (btn_undo, btn_clear, btn_black, btn_blue, btn_red):
+            dh.addWidget(b)
         dh.addStretch()
         ld.addLayout(dh)
         self.tabs.addTab(w_draw, "Draw")
@@ -299,11 +311,27 @@ class SignatureDialog(QDialog):
         lt = QVBoxLayout(w_type)
         self.type_input = QLineEdit()
         self.type_input.setPlaceholderText("Type your signature name...")
+        lt.addWidget(self.type_input)
+
+        th_type = QHBoxLayout()
+        th_type.addWidget(QLabel("Style:"))
+        self.type_style_combo = QComboBox()
+        self.type_style_combo.addItem("Cursive Script", "script")
+        self.type_style_combo.addItem("Georgia Serif", "serif")
+        self.type_style_combo.addItem("Classic Italic", "classic")
+        self.type_style_combo.currentIndexChanged.connect(self._on_type_style_changed)
+        th_type.addWidget(self.type_style_combo)
+        for lbl, hex_c in [("Black", "#000000"), ("Blue", "#0033aa"), ("Red", "#b91c1c")]:
+            b_col = QPushButton(lbl)
+            b_col.clicked.connect(lambda _=False, hc=hex_c: self._set_ink(hc))
+            th_type.addWidget(b_col)
+        th_type.addStretch()
+        lt.addLayout(th_type)
+
         self.type_preview = QLabel("Your Signature")
         self.type_preview.setAlignment(Qt.AlignCenter)
         self.type_preview.setFont(QFont("Segoe Script", 24, QFont.Bold))
         self.type_input.textChanged.connect(lambda t: self.type_preview.setText(t or "Your Signature"))
-        lt.addWidget(self.type_input)
         lt.addWidget(self.type_preview, stretch=1)
         self.tabs.addTab(w_type, "Type")
 
@@ -331,15 +359,61 @@ class SignatureDialog(QDialog):
         li.addWidget(self.upload_preview, stretch=1)
         self.tabs.addTab(w_img, "Upload Image")
 
+        # Tab 4: Saved Signatures
+        w_saved = QWidget()
+        ls = QVBoxLayout(w_saved)
+        self.saved_list = QListWidget()
+        self.saved_list.setIconSize(QSize(220, 64))
+        self.saved_list.itemDoubleClicked.connect(lambda _it: self._on_accept())
+        ls.addWidget(self.saved_list)
+        btn_clear_saved = QPushButton("Clear Saved Signatures")
+        btn_clear_saved.clicked.connect(self._clear_saved)
+        ls.addWidget(btn_clear_saved, alignment=Qt.AlignRight)
+        self.tabs.addTab(w_saved, f"Saved ({len(self._SAVED_SIGNATURES)})")
+        self._populate_saved_list()
+
+        bottom_row = QHBoxLayout()
+        self.chk_save_reuse = QCheckBox("Save signature for quick reuse in this session")
+        self.chk_save_reuse.setChecked(True)
+        bottom_row.addWidget(self.chk_save_reuse)
+        bottom_row.addStretch()
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.button(QDialogButtonBox.Ok).setText("Place Signature")
         btns.accepted.connect(self._on_accept)
         btns.rejected.connect(self.reject)
-        root.addWidget(btns)
+        bottom_row.addWidget(btns)
+        root.addLayout(bottom_row)
+
+    def _populate_saved_list(self) -> None:
+        self.saved_list.clear()
+        for idx, (label, png_bytes) in enumerate(self._SAVED_SIGNATURES):
+            pm = QPixmap()
+            pm.loadFromData(png_bytes, "PNG")
+            it = QListWidgetItem(QIcon(pm), label)
+            it.setData(Qt.UserRole, idx)
+            self.saved_list.addItem(it)
+        if self.saved_list.count() > 0:
+            self.saved_list.setCurrentRow(0)
+        self.tabs.setTabText(3, f"Saved ({len(self._SAVED_SIGNATURES)})")
+
+    def _clear_saved(self) -> None:
+        self._SAVED_SIGNATURES.clear()
+        self._populate_saved_list()
+
+    def _on_type_style_changed(self, _idx: int) -> None:
+        self._typed_style = str(self.type_style_combo.currentData() or "script")
+        font_map = {
+            "script": QFont("Segoe Script", 24, QFont.Bold),
+            "serif": QFont("Georgia", 24, QFont.Normal, True),
+            "classic": QFont("Times New Roman", 24, QFont.Normal, True),
+        }
+        self.type_preview.setFont(font_map.get(self._typed_style, font_map["script"]))
 
     def _set_ink(self, hex_col: str) -> None:
+        self._ink_color_hex = hex_col
         self.pad.pen_color = QColor(hex_col)
         self.pad.update()
+        self.type_preview.setStyleSheet(f"color: {hex_col};")
 
     def _pick_image(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -383,18 +457,32 @@ class SignatureDialog(QDialog):
 
     def _on_accept(self) -> None:
         tab_idx = self.tabs.currentIndex()
+        label = "Drawn Signature"
         if tab_idx == 0:
             self.result_png_bytes = self.pad.to_png_bytes()
         elif tab_idx == 1:
             txt = self.type_input.text().strip()
             if txt:
-                self.result_png_bytes = render_typed_signature_png(txt, self.pad.pen_color.name())
-        else:
+                label = f"Typed: {txt}"
+                self.result_png_bytes = render_typed_signature_png(
+                    txt, self._ink_color_hex, font_style=self._typed_style
+                )
+        elif tab_idx == 2:
+            label = "Uploaded Signature"
             self.result_png_bytes = getattr(self, "_processed_upload_png", None)
+        else:
+            row = self.saved_list.currentRow()
+            if 0 <= row < len(self._SAVED_SIGNATURES):
+                self.result_png_bytes = self._SAVED_SIGNATURES[row][1]
 
         if not self.result_png_bytes:
-            QMessageBox.warning(self, "Signature", "Please draw, type, or upload a signature first.")
+            QMessageBox.warning(self, "Signature", "Please draw, type, upload, or select a signature first.")
             return
+        if tab_idx != 3 and self.chk_save_reuse.isChecked():
+            existing = [b for _, b in self._SAVED_SIGNATURES]
+            if self.result_png_bytes not in existing:
+                self._SAVED_SIGNATURES.insert(0, (label, self.result_png_bytes))
+                del self._SAVED_SIGNATURES[8:]
         self.accept()
 
 
@@ -470,12 +558,25 @@ class SplitDialog(QDialog):
         self.total_pages = total_pages
         form = QFormLayout(self)
 
+        self.rb_ranges = QRadioButton("Split by custom page ranges:")
+        self.rb_ranges.setChecked(True)
         self.ranges_input = QLineEdit()
         self.ranges_input.setPlaceholderText("e.g. 1-3, 5, 7-10")
-        hint = QLabel(f"Document has {total_pages} page(s). Each range creates a separate PDF file.")
+
+        self.rb_every_n = QRadioButton("Split every N pages:")
+        self.every_n_spin = QSpinBox()
+        self.every_n_spin.setRange(1, max(1, total_pages))
+        self.every_n_spin.setValue(1)
+        self.every_n_spin.setEnabled(False)
+
+        self.rb_ranges.toggled.connect(self.ranges_input.setEnabled)
+        self.rb_every_n.toggled.connect(self.every_n_spin.setEnabled)
+
+        hint = QLabel(f"Document has {total_pages} page(s). Each part creates a separate PDF file.")
         hint.setWordWrap(True)
 
-        form.addRow("Page Ranges:", self.ranges_input)
+        form.addRow(self.rb_ranges, self.ranges_input)
+        form.addRow(self.rb_every_n, self.every_n_spin)
         form.addRow(hint)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -484,12 +585,19 @@ class SplitDialog(QDialog):
         btns.rejected.connect(self.reject)
         form.addRow(btns)
 
+    def is_every_n_mode(self) -> bool:
+        return self.rb_every_n.isChecked()
+
+    def every_n_value(self) -> int:
+        return int(self.every_n_spin.value())
+
     def _validate_and_accept(self) -> None:
-        try:
-            parse_page_ranges(self.ranges_input.text(), self.total_pages)
-        except ValueError as err:
-            QMessageBox.warning(self, "Invalid Page Range", str(err))
-            return
+        if not self.is_every_n_mode():
+            try:
+                parse_page_ranges(self.ranges_input.text(), self.total_pages)
+            except ValueError as err:
+                QMessageBox.warning(self, "Invalid Page Range", str(err))
+                return
         self.accept()
 
 
@@ -797,6 +905,7 @@ class PdfPrintDialog(QDialog):
 
         self.preview = QPrintPreviewWidget(self.printer, self)
         self.preview.paintRequested.connect(self._on_preview_paint)
+        self.preview.previewChanged.connect(self._update_preview_label)
         prev_col.addWidget(self.preview, stretch=1)
         root.addLayout(prev_col, stretch=1)
 
@@ -884,7 +993,9 @@ class PdfPrintDialog(QDialog):
         self.lbl_prev_page.setText(f"Page {self.preview.currentPage()} / {max(1, self.preview.pageCount())}")
 
     def _refresh_preview(self, *_args) -> None:
-        self._apply_orientation_to_printer(self.printer, self._safe_page_indices()[0])
+        indices = self._safe_page_indices()
+        if indices:
+            self._apply_orientation_to_printer(self.printer, indices[0])
         self.preview.updatePreview()
         self._update_preview_label()
 
@@ -1014,6 +1125,15 @@ class PdfPrintDialog(QDialog):
             return
         dlg = QPrintDialog(self.printer, self)
         if dlg.exec():
+            if (
+                self.printer.printRange() == QPrinter.PageRange
+                and self.printer.fromPage() > 0
+                and self.printer.toPage() >= self.printer.fromPage()
+            ):
+                s = max(1, min(self._total_pages, self.printer.fromPage()))
+                e = max(s, min(self._total_pages, self.printer.toPage()))
+                self.rb_custom.setChecked(True)
+                self.range_input.setText(f"{s}-{e}")
             self.used_system_dialog = True
             self.accept()
 

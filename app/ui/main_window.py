@@ -52,6 +52,7 @@ from app.core.document_ops import (
     merge_pdfs,
     organize_pages,
     split_pdf_by_ranges,
+    split_pdf_every_n,
     update_metadata,
     write_bytes_atomic,
 )
@@ -439,6 +440,7 @@ class MainWindow(QMainWindow):
         self.ribbon.newClicked.connect(self.new_blank_pdf)
         self.ribbon.openClicked.connect(self.open_file_dialog)
         self.ribbon.recentFileClicked.connect(self.open_pdf_path)
+        self.ribbon.clearRecentClicked.connect(self._clear_recent_files)
         self.ribbon.saveClicked.connect(self.save_current_pdf)
         self.ribbon.saveAsClicked.connect(self.save_as_current_pdf)
         self.ribbon.printClicked.connect(self.print_current_pdf)
@@ -670,6 +672,14 @@ class MainWindow(QMainWindow):
             self.open_pdf_path(path)
 
     def open_pdf_path(self, path: str) -> DocumentTab | None:
+        norm = os.path.normcase(os.path.abspath(path))
+        for i in range(self.tabs.count()):
+            existing = self.tabs.tabData(i)
+            if isinstance(existing, DocumentTab) and existing.engine.file_path:
+                if os.path.normcase(os.path.abspath(existing.engine.file_path)) == norm:
+                    self.tabs.setCurrentIndex(i)
+                    self.status_bar.showMessage(f"Switched to open document: {existing.engine.name}")
+                    return existing
         try:
             with open(path, "rb") as f:
                 data = f.read()
@@ -741,6 +751,11 @@ class MainWindow(QMainWindow):
         updated = [p for p in self._load_recent_files() if os.path.normcase(p) != norm]
         QSettings("Personal", "Personal PDF Suite").setValue("recentFiles", updated)
         self.ribbon.update_recent_files(updated)
+
+    def _clear_recent_files(self) -> None:
+        QSettings("Personal", "Personal PDF Suite").setValue("recentFiles", [])
+        self.ribbon.update_recent_files([])
+        self.status_bar.showMessage("Cleared recent files list")
 
     def _set_tab_dirty(self, tab: DocumentTab, dirty: bool = True) -> None:
         tab.dirty = dirty
@@ -1416,6 +1431,7 @@ class MainWindow(QMainWindow):
             self.tool_state["width"] = self._ink_width
             self.tool_state["opacity"] = 1.0
         self.ribbon.set_width_indicator(self.tool_state["width"])
+        self.ribbon.set_active_tool_indicator(tool)
         if tab:
             for pw in tab.page_widgets:
                 pw.set_tool_state(**self.tool_state)
@@ -1562,7 +1578,10 @@ class MainWindow(QMainWindow):
                 if not out_dir:
                     return
                 try:
-                    results = split_pdf_by_ranges(cur_bytes, dlg.ranges_input.text(), tab.engine.name)
+                    if dlg.is_every_n_mode():
+                        results = split_pdf_every_n(cur_bytes, dlg.every_n_value(), tab.engine.name)
+                    else:
+                        results = split_pdf_by_ranges(cur_bytes, dlg.ranges_input.text(), tab.engine.name)
                     for fname, fbytes in results:
                         write_bytes_atomic(os.path.join(out_dir, fname), fbytes)
                 except Exception as err:
@@ -1644,13 +1663,17 @@ class MainWindow(QMainWindow):
         elif action == "export_png":
             cur_bytes = tab.engine.build_final_pdf_bytes()
             path, _ = QFileDialog.getSaveFileName(
-                self, "Export Page as PNG", f"page_{tab.current_page + 1}.png", "PNG Image (*.png)"
+                self,
+                "Export Page as Image",
+                f"page_{tab.current_page + 1}.png",
+                "PNG Image (*.png);;JPEG Image (*.jpg *.jpeg)",
             )
             if path:
+                fmt = "jpeg" if path.lower().endswith((".jpg", ".jpeg")) else "png"
                 try:
-                    write_bytes_atomic(path, export_page_image(cur_bytes, tab.current_page, dpi=200, fmt="png"))
+                    write_bytes_atomic(path, export_page_image(cur_bytes, tab.current_page, dpi=200, fmt=fmt))
                 except Exception as err:
-                    QMessageBox.critical(self, "Export Page", f"Could not export PNG:\n{err}")
+                    QMessageBox.critical(self, "Export Page", f"Could not export image:\n{err}")
                     return
                 self.status_bar.showMessage(f"Exported page {tab.current_page + 1} to {path}")
 

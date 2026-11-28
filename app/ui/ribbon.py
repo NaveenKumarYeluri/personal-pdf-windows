@@ -38,6 +38,7 @@ class RibbonHeader(QWidget):
     saveAsClicked = Signal()
     printClicked = Signal()
     findReplaceClicked = Signal()
+    clearRecentClicked = Signal()
     themeToggled = Signal()
     accentChanged = Signal(str, str)
     propsClicked = Signal()
@@ -65,6 +66,8 @@ class RibbonHeader(QWidget):
         self._icon_color = "#334155"
         self.current_mode = "view"
         self._tool_buttons: list[tuple[QPushButton, str]] = []
+        self._mode_tool_group: QButtonGroup | None = None
+        self._mode_tool_buttons: dict[str, QPushButton] = {}
         self._width_combo: QComboBox | None = None
         self._active_width_pt: float = 3.0
         self._typing_search = False
@@ -220,6 +223,8 @@ class RibbonHeader(QWidget):
         for fp in paths:
             act = self.recent_menu.addAction(fp)
             act.triggered.connect(lambda _chk=False, p=fp: self.recentFileClicked.emit(p))
+        self.recent_menu.addSeparator()
+        self.recent_menu.addAction("Clear Recent Files", self.clearRecentClicked.emit)
 
     @staticmethod
     def _make_divider() -> QFrame:
@@ -360,6 +365,8 @@ class RibbonHeader(QWidget):
 
     def _clear_dynamic_tools(self) -> None:
         self._width_combo = None
+        self._mode_tool_group = None
+        self._mode_tool_buttons.clear()
         while self.dynamic_layout.count():
             item = self.dynamic_layout.takeAt(0)
             w = item.widget()
@@ -367,6 +374,19 @@ class RibbonHeader(QWidget):
                 w.hide()
                 w.setParent(None)
                 w.deleteLater()
+
+    def set_active_tool_indicator(self, tool: str) -> None:
+        grp = self._mode_tool_group
+        if grp is None or not self._mode_tool_buttons:
+            return
+        btn = self._mode_tool_buttons.get(tool)
+        if btn is not None:
+            btn.setChecked(True)
+            return
+        grp.setExclusive(False)
+        for b in self._mode_tool_buttons.values():
+            b.setChecked(False)
+        grp.setExclusive(True)
 
     def _add_tool_btn(
         self,
@@ -381,6 +401,8 @@ class RibbonHeader(QWidget):
         if checkable:
             btn.setCheckable(True)
             btn.setChecked(checked)
+            if action_name.startswith("tool:"):
+                self._mode_tool_buttons[action_name.split(":", 1)[1]] = btn
         if danger:
             btn.setObjectName("DangerBtn")
         else:
@@ -400,6 +422,7 @@ class RibbonHeader(QWidget):
         if mode == "edit":
             grp = QButtonGroup(self.context_bar)
             grp.setExclusive(True)
+            self._mode_tool_group = grp
             b_in = self._add_tool_btn("Edit Text", "tool:edit_text", checkable=True, checked=True)
             b_add = self._add_tool_btn("Add Text", "tool:add_text", checkable=True)
             b_wo = self._add_tool_btn("Whiteout", "tool:whiteout", checkable=True)
@@ -414,6 +437,7 @@ class RibbonHeader(QWidget):
         elif mode == "annotate":
             grp = QButtonGroup(self.context_bar)
             grp.setExclusive(True)
+            self._mode_tool_group = grp
             for label, tname, chk in [
                 ("Select", "tool:select", False),
                 ("Pen", "tool:pen", True),
@@ -469,7 +493,11 @@ class RibbonHeader(QWidget):
 
         elif mode == "protect":
             self._add_tool_btn("Encrypt (AES-256)", "open_protect")
-            self._add_tool_btn("Redact Area", "tool:redact", checkable=True, danger=True)
+            b_red = self._add_tool_btn("Redact Area", "tool:redact", checkable=True, danger=True)
+            grp = QButtonGroup(self.context_bar)
+            grp.setExclusive(False)
+            grp.addButton(b_red)
+            self._mode_tool_group = grp
 
         elif mode == "export":
             self._add_tool_btn("Export Page (PNG)", "export_png")
